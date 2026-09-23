@@ -1,13 +1,10 @@
 """
-db.py — 書目資料庫（SQLite）的所有操作都集中在這裡。
+db.py — 資料庫（SQLite）的所有操作。
 
-資料表 books 只有一張：
-    isbn        ISBN-13（主鍵，同一本書只會有一筆）
-    title       書名
-    author      作者
-    price       定價（文字，例如 110）
-    publisher   出版社
-    search_key  把上面四欄正規化後串起來，專門給關鍵字查詢用
+每個商品種類一個 .db 檔（設定在 config.py），表格結構由設定自動產生：
+    <主鍵欄>    ISBN 或 JAN（同一個碼只會有一筆）
+    <其他欄>    書名、作者、價格……
+    search_key  把可搜尋的欄位正規化後串起來，專門給關鍵字查詢用
     updated_at  最後更新時間
 """
 import re
@@ -16,18 +13,6 @@ import unicodedata
 from datetime import datetime
 
 import pandas as pd
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS books (
-    isbn       TEXT PRIMARY KEY,
-    title      TEXT NOT NULL,
-    author     TEXT NOT NULL DEFAULT '',
-    publisher  TEXT NOT NULL DEFAULT '',
-    price      TEXT NOT NULL DEFAULT '',
-    search_key TEXT NOT NULL DEFAULT '',
-    updated_at TEXT
-);
-"""
 
 
 # ---------------------------------------------------------------- 文字處理
@@ -42,11 +27,17 @@ def normalize(text) -> str:
 
 
 def clean_text(text) -> str:
-    """給顯示用的文字：只去掉頭尾空白和空值，不改大小寫。"""
     if text is None:
         return ""
     s = str(text).strip()
     return "" if s.lower() in ("nan", "none") else s
+
+
+def _digits(raw) -> str:
+    s = normalize(raw).upper()
+    if s.endswith(".0"):          # Excel 把數字讀成小數時會多出 .0
+        s = s[:-2]
+    return re.sub(r"[^0-9X]", "", s)
 
 
 def _isbn10_to_13(isbn10: str) -> str:
@@ -56,13 +47,7 @@ def _isbn10_to_13(isbn10: str) -> str:
 
 
 def clean_isbn(raw) -> str | None:
-    """把各種寫法的 ISBN 統一成 13 碼純數字；無法辨識就回傳 None。"""
-    if raw is None:
-        return None
-    s = normalize(raw).upper()
-    if s.endswith(".0"):          # Excel 把數字讀成小數時會多出 .0
-        s = s[:-2]
-    s = re.sub(r"[^0-9X]", "", s)  # 去掉連字號、空白等
+    s = _digits(raw)
     if len(s) == 13 and s.isdigit():
         return s
     if len(s) == 10 and s[:9].isdigit():
@@ -70,12 +55,22 @@ def clean_isbn(raw) -> str | None:
     return None
 
 
+def clean_jan(raw) -> str | None:
+    """JAN / EAN：13 碼或 8 碼。12 碼（開頭的 0 被 Excel 吃掉）自動補回。"""
+    s = _digits(raw)
+    if not s.isdigit():
+        return None
+    if len(s) == 12:
+        s = "0" + s
+    return s if len(s) in (8, 13) else None
+
+
 def clean_price(raw) -> str:
     """「NT$1,200元」「110.0」之類的寫法統一成「1200」「110」；無法辨識就原樣保留。"""
     s = clean_text(raw)
     if not s:
         return ""
-    t = re.sub(r"(nt\$|nt|\$|元|,|\s)", "", normalize(s))
+    t = re.sub(r"(nt\$|nt|\$|¥|円|元|,|\s)", "", normalize(s))
     try:
         v = float(t)
         return str(int(v)) if v == int(v) else str(v)
@@ -83,126 +78,135 @@ def clean_price(raw) -> str:
         return s
 
 
-def make_search_key(isbn, title, author, publisher) -> str:
-    # 定價刻意不放進搜尋，避免查「航海王 105」時被定價 105 的書干擾
-    return " ".join(normalize(x) for x in (isbn, title, author, publisher))
+CLEANERS = {"isbn": clean_isbn, "jan": clean_jan, "price": clean_price, "text": clean_text}
+
+
+# ---------------------------------------------------------------- 設定小工具
+def key_field(cat) -> str:
+    return cat["fields"][0]["key"]
+
+
+def labels(cat) -> list[str]:
+    return [f["label"] for f in cat["fields"]]
+
+
+def _search_fields(cat) -> list[str]:
+    return [f["key"] for f in cat["fields"] if f.get("search", True)]
+
+
+def _make_search_key(values: dict, cat) -> str:
+    return " ".join(normalize(values.get(k, "")) for k in _search_fields(cat))
 
 
 # ---------------------------------------------------------------- 連線與建表
-def connect(path: str) -> sqlite3.Connection:
+def connect(path: str, cat) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
-    conn.execute(SCHEMA)
-    # 舊版 books.db 沒有定價欄：自動補上
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(books)")]
-    if "price" not in cols:
-        conn.execute("ALTER TABLE books ADD COLUMN price TEXT NOT NULL DEFAULT ''")
+    t, key = cat["table"], key_field(cat)
+    others = ",\n".join(f"    {f['key']} TEXT NOT NULL DEFAULT ''" for f in cat["fields"][1:])
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {t} (
+            {key} TEXT PRIMARY KEY,
+        {others},
+            search_key TEXT NOT NULL DEFAULT '',
+            updated_at TEXT
+        )""")
+    # 設定裡新增了欄位、但舊的 .db 還沒有：自動補上
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
+    for f in cat["fields"]:
+        if f["key"] not in existing:
+            conn.execute(f"ALTER TABLE {t} ADD COLUMN {f['key']} TEXT NOT NULL DEFAULT ''")
     conn.commit()
     return conn
 
 
-def count(conn) -> int:
-    return conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+def count(conn, cat) -> int:
+    return conn.execute(f"SELECT COUNT(*) FROM {cat['table']}").fetchone()[0]
+
+
+def rebuild_search_keys(conn, cat) -> None:
+    """重算搜尋欄位。網站啟動時執行一次，用 DB Browser 手動改過的資料也查得到。"""
+    keys = [f["key"] for f in cat["fields"]]
+    rows = conn.execute(f"SELECT {', '.join(keys)} FROM {cat['table']}").fetchall()
+    conn.executemany(
+        f"UPDATE {cat['table']} SET search_key = ? WHERE {keys[0]} = ?",
+        [(_make_search_key(dict(zip(keys, r)), cat), r[0]) for r in rows],
+    )
+    conn.commit()
 
 
 # ---------------------------------------------------------------- 查詢
-COLUMNS = ["ISBN", "書名", "作者", "定價", "出版社"]
-
 def _natural_key(text: str):
-    """讓「航海王 2」排在「航海王 10」前面，而不是照字元順序。"""
+    """讓「航海王 2」排在「航海王 10」前面。"""
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", text)]
 
 
 def _prepare_tokens(query: str) -> list[str]:
     tokens = []
     for t in normalize(query).split():
-        if re.fullmatch(r"[0-9\-x]+", t):   # 看起來像 ISBN：把連字號拿掉
+        if re.fullmatch(r"[0-9\-x]+", t):   # 看起來像條碼：拿掉連字號
             t = t.replace("-", "")
         if t:
             tokens.append(t)
     return tokens
 
 
-def search(conn, query: str, limit: int = 300) -> tuple[pd.DataFrame, bool]:
-    """
-    用空白分隔的每個關鍵字都必須出現（AND），但可以出現在任何一欄。
-    例：「航海王 105」＝書名含航海王、且某欄含 105。
-    回傳 (結果表, 是否因超過上限而被截斷)
-    """
+def search(conn, cat, query: str, limit: int = 300) -> tuple[pd.DataFrame, bool]:
+    """每個關鍵字都必須出現（AND），但可以在任何一欄。回傳 (結果表, 是否被截斷)"""
+    keys = [f["key"] for f in cat["fields"]]
     tokens = _prepare_tokens(query)
     if not tokens:
-        return pd.DataFrame(columns=COLUMNS), False
+        return pd.DataFrame(columns=labels(cat)), False
 
     where, params = [], []
     for t in tokens:
         t = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         where.append("search_key LIKE ? ESCAPE '\\'")
         params.append(f"%{t}%")
-
-    sql = (
-        "SELECT isbn, title, author, price, publisher FROM books WHERE "
-        + " AND ".join(where)
-        + " LIMIT ?"
-    )
+    sql = f"SELECT {', '.join(keys)} FROM {cat['table']} WHERE {' AND '.join(where)} LIMIT ?"
     params.append(limit + 1)
     rows = conn.execute(sql, params).fetchall()
 
     truncated = len(rows) > limit
     rows = rows[:limit]
     rows.sort(key=lambda r: (_natural_key(r[1]), r[0]))
-    df = pd.DataFrame(rows, columns=COLUMNS)
-    return df, truncated
+    return pd.DataFrame(rows, columns=labels(cat)), truncated
 
 
 # ---------------------------------------------------------------- 寫入
-def upsert(conn, records: list[dict]) -> tuple[int, int]:
+def upsert(conn, cat, records: list[dict]) -> tuple[int, int]:
     """
-    records 每筆需有 isbn, title，可有 author, price, publisher。
-    已存在的 ISBN 會更新；新檔案裡某欄是空白時，保留資料庫原本的值。
+    已存在的碼會更新；新檔案裡某欄空白時，保留資料庫原本的值。
     回傳 (新增筆數, 更新筆數)
     """
     if not records:
         return 0, 0
+    t, keys = cat["table"], [f["key"] for f in cat["fields"]]
+    pk = keys[0]
+    ids = list({r[pk] for r in records})
 
     existing = set()
-    isbns = [r["isbn"] for r in records]
-    for i in range(0, len(isbns), 500):
-        chunk = isbns[i:i + 500]
-        q = f"SELECT isbn FROM books WHERE isbn IN ({','.join('?' * len(chunk))})"
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        q = f"SELECT {pk} FROM {t} WHERE {pk} IN ({','.join('?' * len(chunk))})"
         existing.update(row[0] for row in conn.execute(q, chunk))
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sql = """
-    INSERT INTO books (isbn, title, author, price, publisher, search_key, updated_at)
-    VALUES (?, ?, ?, ?, ?, '', ?)
-    ON CONFLICT(isbn) DO UPDATE SET
-        title      = COALESCE(NULLIF(excluded.title, ''),     books.title),
-        author     = COALESCE(NULLIF(excluded.author, ''),    books.author),
-        price      = COALESCE(NULLIF(excluded.price, ''),     books.price),
-        publisher  = COALESCE(NULLIF(excluded.publisher, ''), books.publisher),
-        updated_at = excluded.updated_at
-    """
-    conn.executemany(sql, [
-        (r["isbn"], r.get("title", ""), r.get("author", ""), r.get("price", ""),
-         r.get("publisher", ""), now)
-        for r in records
-    ])
+    sets = ",\n".join(f"{k} = COALESCE(NULLIF(excluded.{k}, ''), {t}.{k})" for k in keys[1:])
+    sql = f"""
+        INSERT INTO {t} ({', '.join(keys)}, search_key, updated_at)
+        VALUES ({', '.join('?' * len(keys))}, '', ?)
+        ON CONFLICT({pk}) DO UPDATE SET
+        {sets},
+        updated_at = excluded.updated_at"""
+    conn.executemany(sql, [tuple(r.get(k, "") for k in keys) + (now,) for r in records])
 
-    # 以合併後的最終內容重算搜尋欄位
-    for i in range(0, len(isbns), 500):
-        chunk = isbns[i:i + 500]
-        q = f"SELECT isbn, title, author, publisher FROM books WHERE isbn IN ({','.join('?' * len(chunk))})"
-        updates = [(make_search_key(*row), row[0]) for row in conn.execute(q, chunk).fetchall()]
-        conn.executemany("UPDATE books SET search_key = ? WHERE isbn = ?", updates)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        q = f"SELECT {', '.join(keys)} FROM {t} WHERE {pk} IN ({','.join('?' * len(chunk))})"
+        updates = [(_make_search_key(dict(zip(keys, r)), cat), r[0])
+                   for r in conn.execute(q, chunk).fetchall()]
+        conn.executemany(f"UPDATE {t} SET search_key = ? WHERE {pk} = ?", updates)
 
     conn.commit()
-    inserted = sum(1 for i in set(isbns) if i not in existing)
-    updated = len(set(isbns)) - inserted
-    return inserted, updated
-
-
-def rebuild_search_keys(conn) -> None:
-    """重算所有書的搜尋欄位。網站啟動時執行一次，這樣用 DB Browser 手動改過的資料也查得到。"""
-    rows = conn.execute("SELECT isbn, title, author, publisher FROM books").fetchall()
-    conn.executemany("UPDATE books SET search_key = ? WHERE isbn = ?",
-                     [(make_search_key(*r), r[0]) for r in rows])
-    conn.commit()
+    inserted = sum(1 for i in ids if i not in existing)
+    return inserted, len(ids) - inserted
