@@ -47,7 +47,7 @@ def pick_category(key: str) -> str:
 
 # ====================================================================== 查詢頁
 def page_search():
-    st.title("📚 中文書籍查詢系統")
+    st.title("📚 不太共通の商品查詢系統")
     cat_id = pick_category("search_cat")
     cat = CATEGORIES[cat_id]
     conn = current_conn(cat_id)
