@@ -19,7 +19,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_RESULTS = 300
 CAT_IDS = list(CATEGORIES)
 
-st.set_page_config(page_title="中文書籍查詢系統", page_icon="📚", layout="wide")
+st.set_page_config(page_title="不太共通の商品查詢系統", page_icon="📚", layout="wide")
 
 
 def db_path(cat_id: str) -> str:
