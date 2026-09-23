@@ -1,8 +1,8 @@
 """
-app.py — 中文漫畫書目查詢（Streamlit）
+app.py — 中文書籍查詢系統（Streamlit）
 
 兩個頁面：
-  🔍 書目查詢：現場人員用，輸入關鍵字 → 查 ISBN → 複製
+  🔍 書目查詢：現場人員用，輸入關鍵字 → 查 ISBN → 在表格上選取範圍複製
   🛠 資料維護：上傳出版社建檔檔案 → 併入資料庫 → 下載新的 books.db → 上傳到 GitHub
 """
 import os
@@ -16,7 +16,7 @@ import importer
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "books.db")
 MAX_RESULTS = 300
 
-st.set_page_config(page_title="中文漫畫書目查詢", page_icon="📚", layout="wide")
+st.set_page_config(page_title="中文書籍查詢系統", page_icon="📚", layout="wide")
 
 
 @st.cache_resource
@@ -35,7 +35,7 @@ def current_conn():
 # ====================================================================== 查詢頁
 def page_search():
     conn = current_conn()
-    st.title("📚 中文漫畫書目查詢")
+    st.title("📚 中文書籍查詢系統")
     st.caption(f"目前收錄 {db.count(conn):,} 筆")
 
     q = st.text_input(
@@ -65,6 +65,7 @@ def page_search():
         column_config={
             "ISBN": st.column_config.TextColumn(width="medium"),
             "書名": st.column_config.TextColumn(width="large"),
+            "定價": st.column_config.TextColumn(width="small"),
         },
     )
 
@@ -73,20 +74,16 @@ def page_search():
     st.subheader("複製單筆")
     if selected:
         row = df.iloc[selected[0]]
-        cols = st.columns([1.2, 2, 1.2, 1.2])
-        for col, field in zip(cols, ["ISBN", "書名", "作者", "出版社"]):
+        cols = st.columns([1.2, 2, 1.2, 0.6, 1.2])
+        for col, field in zip(cols, db.COLUMNS):
             with col:
                 st.caption(field)
                 st.code(row[field] or "（無資料）", language=None)
         st.caption("按每格右上角的圖示即可複製該欄。")
     else:
-        st.caption("點選表格最左邊的方格選取一本書，這裡會出現它的 ISBN、書名、作者、出版社，各自可以單獨複製。")
+        st.caption("點選表格最左邊的方格選取一本書，這裡會出現它的各欄資料，可以單獨複製。"
+                   "也可以直接在表格上拖曳選取範圍，按 Ctrl+C（Mac 為 ⌘+C）複製。")
 
-    # ---- 整欄複製：把查詢結果的某一欄全部複製
-    st.subheader("複製整欄")
-    field = st.radio("要複製哪一欄", ["ISBN", "書名", "作者", "出版社"], horizontal=True)
-    st.code("\n".join(df[field].astype(str)), language=None)
-    st.caption(f"按右上角的圖示，會複製查詢結果全部 {len(df)} 筆的「{field}」，每筆一行。")
 
 
 # ====================================================================== 維護頁
@@ -152,8 +149,8 @@ def page_maintain():
         auto = importer.guess_mapping(list(df.columns))
         options = ["（不使用）"] + list(df.columns)
         mapping = {}
-        cols = st.columns(4)
-        for col, field in zip(cols, ["isbn", "title", "author", "publisher"]):
+        cols = st.columns(len(importer.FIELDS))
+        for col, field in zip(cols, importer.FIELDS):
             with col:
                 default = options.index(auto[field]) if auto[field] else 0
                 choice = st.selectbox(importer.FIELD_LABELS[field], options, index=default,
@@ -171,8 +168,8 @@ def page_maintain():
         records, skipped = importer.build_records(df, mapping, fixed_pub)
         st.markdown(f"**預覽**：可匯入 {len(records)} 筆，略過 {len(skipped)} 筆")
         if records:
-            preview = [{"ISBN": r["isbn"], "書名": r["title"], "作者": r["author"], "出版社": r["publisher"]}
-                       for r in records[:20]]
+            preview = [{"ISBN": r["isbn"], "書名": r["title"], "作者": r["author"],
+                        "定價": r["price"], "出版社": r["publisher"]} for r in records[:20]]
             st.dataframe(preview, hide_index=True)
         if len(skipped):
             with st.expander(f"查看略過的 {len(skipped)} 筆"):

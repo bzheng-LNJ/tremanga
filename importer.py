@@ -16,9 +16,11 @@ COLUMN_ALIASES = {
     "isbn": ["isbn", "isbn13", "isbn-13", "國際標準書號", "書號", "條碼", "國際條碼", "ean", "barcode"],
     "title": ["書名", "品名", "商品名稱", "書籍名稱", "中文書名", "title", "品項名稱"],
     "author": ["作者", "著者", "作者名", "作/繪者", "作繪者", "原作", "author"],
+    "price": ["定價", "定價(元)", "定價（元）", "售價", "原價", "價格", "建議售價", "price"],
     "publisher": ["出版社", "出版者", "出版公司", "發行", "發行者", "publisher"],
 }
-FIELD_LABELS = {"isbn": "ISBN", "title": "書名", "author": "作者", "publisher": "出版社"}
+FIELD_LABELS = {"isbn": "ISBN", "title": "書名", "author": "作者", "price": "定價", "publisher": "出版社"}
+FIELDS = list(FIELD_LABELS)
 
 
 def _key(name) -> str:
@@ -97,11 +99,13 @@ def build_records(df: pd.DataFrame, mapping: dict, fixed_publisher: str = ""):
             continue
 
         author = db.clean_text(row[mapping["author"]]) if mapping.get("author") else ""
+        price = db.clean_price(row[mapping["price"]]) if mapping.get("price") else ""
         publisher = db.clean_text(row[mapping["publisher"]]) if mapping.get("publisher") else ""
         records[isbn] = {                      # 同一檔案內重複的 ISBN，以後出現的為準
             "isbn": isbn,
             "title": title,
             "author": author,
+            "price": price,
             "publisher": publisher or fixed_publisher.strip(),
         }
     return list(records.values()), pd.DataFrame(skipped)

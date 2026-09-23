@@ -5,6 +5,7 @@ db.py — 書目資料庫（SQLite）的所有操作都集中在這裡。
     isbn        ISBN-13（主鍵，同一本書只會有一筆）
     title       書名
     author      作者
+    price       定價（文字，例如 110）
     publisher   出版社
     search_key  把上面四欄正規化後串起來，專門給關鍵字查詢用
     updated_at  最後更新時間
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS books (
     title      TEXT NOT NULL,
     author     TEXT NOT NULL DEFAULT '',
     publisher  TEXT NOT NULL DEFAULT '',
+    price      TEXT NOT NULL DEFAULT '',
     search_key TEXT NOT NULL DEFAULT '',
     updated_at TEXT
 );
@@ -68,7 +70,21 @@ def clean_isbn(raw) -> str | None:
     return None
 
 
+def clean_price(raw) -> str:
+    """「NT$1,200元」「110.0」之類的寫法統一成「1200」「110」；無法辨識就原樣保留。"""
+    s = clean_text(raw)
+    if not s:
+        return ""
+    t = re.sub(r"(nt\$|nt|\$|元|,|\s)", "", normalize(s))
+    try:
+        v = float(t)
+        return str(int(v)) if v == int(v) else str(v)
+    except ValueError:
+        return s
+
+
 def make_search_key(isbn, title, author, publisher) -> str:
+    # 定價刻意不放進搜尋，避免查「航海王 105」時被定價 105 的書干擾
     return " ".join(normalize(x) for x in (isbn, title, author, publisher))
 
 
@@ -76,6 +92,10 @@ def make_search_key(isbn, title, author, publisher) -> str:
 def connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute(SCHEMA)
+    # 舊版 books.db 沒有定價欄：自動補上
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(books)")]
+    if "price" not in cols:
+        conn.execute("ALTER TABLE books ADD COLUMN price TEXT NOT NULL DEFAULT ''")
     conn.commit()
     return conn
 
@@ -85,6 +105,8 @@ def count(conn) -> int:
 
 
 # ---------------------------------------------------------------- 查詢
+COLUMNS = ["ISBN", "書名", "作者", "定價", "出版社"]
+
 def _natural_key(text: str):
     """讓「航海王 2」排在「航海王 10」前面，而不是照字元順序。"""
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", text)]
@@ -108,7 +130,7 @@ def search(conn, query: str, limit: int = 300) -> tuple[pd.DataFrame, bool]:
     """
     tokens = _prepare_tokens(query)
     if not tokens:
-        return pd.DataFrame(columns=["ISBN", "書名", "作者", "出版社"]), False
+        return pd.DataFrame(columns=COLUMNS), False
 
     where, params = [], []
     for t in tokens:
@@ -117,7 +139,7 @@ def search(conn, query: str, limit: int = 300) -> tuple[pd.DataFrame, bool]:
         params.append(f"%{t}%")
 
     sql = (
-        "SELECT isbn, title, author, publisher FROM books WHERE "
+        "SELECT isbn, title, author, price, publisher FROM books WHERE "
         + " AND ".join(where)
         + " LIMIT ?"
     )
@@ -127,14 +149,14 @@ def search(conn, query: str, limit: int = 300) -> tuple[pd.DataFrame, bool]:
     truncated = len(rows) > limit
     rows = rows[:limit]
     rows.sort(key=lambda r: (_natural_key(r[1]), r[0]))
-    df = pd.DataFrame(rows, columns=["ISBN", "書名", "作者", "出版社"])
+    df = pd.DataFrame(rows, columns=COLUMNS)
     return df, truncated
 
 
 # ---------------------------------------------------------------- 寫入
 def upsert(conn, records: list[dict]) -> tuple[int, int]:
     """
-    records 每筆需有 isbn, title，可有 author, publisher。
+    records 每筆需有 isbn, title，可有 author, price, publisher。
     已存在的 ISBN 會更新；新檔案裡某欄是空白時，保留資料庫原本的值。
     回傳 (新增筆數, 更新筆數)
     """
@@ -150,16 +172,18 @@ def upsert(conn, records: list[dict]) -> tuple[int, int]:
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sql = """
-    INSERT INTO books (isbn, title, author, publisher, search_key, updated_at)
-    VALUES (?, ?, ?, ?, '', ?)
+    INSERT INTO books (isbn, title, author, price, publisher, search_key, updated_at)
+    VALUES (?, ?, ?, ?, ?, '', ?)
     ON CONFLICT(isbn) DO UPDATE SET
         title      = COALESCE(NULLIF(excluded.title, ''),     books.title),
         author     = COALESCE(NULLIF(excluded.author, ''),    books.author),
+        price      = COALESCE(NULLIF(excluded.price, ''),     books.price),
         publisher  = COALESCE(NULLIF(excluded.publisher, ''), books.publisher),
         updated_at = excluded.updated_at
     """
     conn.executemany(sql, [
-        (r["isbn"], r.get("title", ""), r.get("author", ""), r.get("publisher", ""), now)
+        (r["isbn"], r.get("title", ""), r.get("author", ""), r.get("price", ""),
+         r.get("publisher", ""), now)
         for r in records
     ])
 
