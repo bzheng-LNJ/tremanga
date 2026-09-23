@@ -4,6 +4,7 @@ importer.py — 讀取出版社／廠商寄來的建檔檔案，依商品種類�
 欄位別名設定在 config.py；遇到新的欄位名稱，加到對應欄位的 aliases 就能自動辨識。
 """
 import io
+import re
 
 import pandas as pd
 
@@ -59,12 +60,31 @@ def apply_header(raw: pd.DataFrame, header_row: int) -> pd.DataFrame:
 
 
 def guess_mapping(columns: list[str], cat) -> dict:
-    """回傳 {欄位 key: 檔案中的欄名 或 None}"""
+    """回傳 {欄位 key: 檔案中的欄名 或 None}（含 append 附加欄位）"""
     keyed = {_key(c): c for c in columns}
     return {
         f["key"]: next((keyed[_key(a)] for a in f["aliases"] if _key(a) in keyed), None)
-        for f in cat["fields"]
+        for f in cat["fields"] + cat.get("append", [])
     }
+
+
+def _clean_volume(raw) -> str:
+    """「05」「5.0」→「5」；「上」「完」「特裝版」之類原樣保留。"""
+    v = db.clean_text(raw)
+    t = db.normalize(v)
+    if re.fullmatch(r"\d+(\.0+)?", t):
+        return str(int(float(t)))
+    return v
+
+
+def append_value(base: str, extra: str) -> str:
+    """把 extra 接在 base 後面（空一格）；base 已經以它結尾就不重複接。"""
+    if not extra:
+        return base
+    tail = db.normalize(base).replace(" ", "")
+    if re.search(rf"(?<!\d){re.escape(db.normalize(extra).replace(' ', ''))}$", tail):
+        return base
+    return f"{base} {extra}"
 
 
 def build_records(df: pd.DataFrame, mapping: dict, cat, fill_values: dict | None = None):
@@ -81,6 +101,11 @@ def build_records(df: pd.DataFrame, mapping: dict, cat, fill_values: dict | None
             raw = row[col] if col else None
             val = db.CLEANERS[f["kind"]](raw) if col else ""
             rec[f["key"]] = val or fill_values.get(f["key"], "").strip()
+
+        for a in cat.get("append", []):
+            col = mapping.get(a["key"])
+            if col and rec.get(a["into"]):
+                rec[a["into"]] = append_value(rec[a["into"]], _clean_volume(row[col]))
 
         missing = [k for k in cat["required"] if not rec.get(k)]
         if missing:

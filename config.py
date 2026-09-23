@@ -14,6 +14,8 @@ config.py — 商品種類設定。
 第一個欄位就是主鍵：同一個 ISBN / JAN 只會有一筆。
 required    匯入時一定要有值的欄位
 fill_in     檔案裡沒有這個欄位時，可以手動輸入一個值套用到整份檔案
+append      匯入時接在某欄後面的附加欄位（不另存一欄）。
+            例：集數分開寫的建檔檔案，匯入時把集數接到書名後面 →「航海王 105」
 """
 
 CATEGORIES = {
@@ -35,6 +37,10 @@ CATEGORIES = {
         ],
         "required": ["isbn", "title"],
         "fill_in": ["publisher"],
+        "append": [
+            {"key": "volume", "label": "集數", "into": "title",
+             "aliases": ["集數", "集", "卷數", "卷", "冊數", "冊", "巻", "巻數", "vol", "vol.", "volume"]},
+        ],
         "placeholder": "書名、作者、出版社或 ISBN；多個關鍵字用空格分開，例如：航海王 105",
     },
     "jumpshop": {

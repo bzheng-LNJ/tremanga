@@ -173,6 +173,14 @@ def page_maintain():
                                       key=f"map_{cat_id}_{f['key']}_{up.name}")
                 mapping[f["key"]] = None if choice == "（不使用）" else choice
 
+        for a in cat.get("append", []):
+            into = next(f["label"] for f in cat["fields"] if f["key"] == a["into"])
+            default = options.index(auto[a["key"]]) if auto[a["key"]] else 0
+            choice = st.selectbox(
+                f"{a['label']}（檔案裡{a['label']}另外一欄時才指定，會接在{into}後面）",
+                options, index=default, key=f"map_{cat_id}_{a['key']}_{up.name}")
+            mapping[a["key"]] = None if choice == "（不使用）" else choice
+
         fill_values = {}
         for f in cat["fields"]:
             if f["key"] in cat["fill_in"] and not mapping[f["key"]]:

@@ -136,7 +136,8 @@ def rebuild_search_keys(conn, cat) -> None:
 
 # ---------------------------------------------------------------- 查詢
 def _natural_key(text: str):
-    """讓「航海王 2」排在「航海王 10」前面。"""
+    """讓「航海王 2」排在「航海王 10」前面；有無空格（航海王105／航海王 105）一視同仁。"""
+    text = normalize(text).replace(" ", "")
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", text)]
 
 
