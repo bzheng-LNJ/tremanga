@@ -15,6 +15,7 @@ import streamlit as st
 
 import db
 import importer
+import synonyms as syn
 from config import CATEGORIES
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +43,18 @@ def current_conn(cat_id: str):
     return get_conn(cat_id, os.path.getmtime(p) if os.path.exists(p) else 0)
 
 
+SYN_PATH = os.path.join(BASE_DIR, syn.FILENAME)
+
+
+@st.cache_data
+def _synonym_lookup(_mtime):
+    return syn.build_lookup(syn.read_table(SYN_PATH))
+
+
+def synonym_lookup() -> dict:
+    return _synonym_lookup(os.path.getmtime(SYN_PATH) if os.path.exists(SYN_PATH) else 0)
+
+
 def pick_category(key: str) -> str:
     return st.radio("商品種類", CAT_IDS, format_func=lambda c: CATEGORIES[c]["label"],
                     horizontal=True, key=key)
@@ -65,7 +78,7 @@ def page_search():
         st.info("輸入關鍵字後按 Enter 查詢。")
         return
 
-    df, truncated = db.search(conn, cat, q, limit=MAX_RESULTS)
+    df, truncated = db.search(conn, cat, q, limit=MAX_RESULTS, synonyms=synonym_lookup())
     if df.empty:
         st.warning("查無資料。可以試試少打幾個字，或只用名稱的一部分查詢。")
         return
@@ -279,9 +292,62 @@ def page_maintain():
         st.dataframe(logs, hide_index=True)
 
 
+# ====================================================================== 同義詞表
+def page_synonyms():
+    st.title("📖 同義詞表")
+    editor = _login()
+    if not editor:
+        return
+
+    st.markdown(
+        "每一列是一組**指同一個東西的不同寫法**，名稱1、名稱2……往右填，用不到的格子留空。"
+        "例如：排球少年｜ハイキュー｜Haikyu、百樂｜PILOT｜パイロット。\n\n"
+        "查詢時輸入其中任何一個名稱，就會同時找出其他寫法的商品。所有商品種類共用這張表。"
+    )
+    st.caption("在表格最下方的空白列輸入可新增一組；選取列後按鍵盤 Delete 可刪除。改完按「發佈」。")
+
+    gh = _github()
+    ss = st.session_state
+    if "syn_sha" not in ss:                      # 記下開始編輯時的版本，發佈時用來檢查衝突
+        ss.syn_sha = gh.fetch(syn.FILENAME)[1] if gh else None
+
+    table = syn.read_table(SYN_PATH)
+    if ss.get("syn_msg"):
+        st.success(ss.pop("syn_msg"))
+        if not gh and ss.get("syn_bytes"):
+            st.download_button(f"下載 {syn.FILENAME}", data=ss.syn_bytes,
+                               file_name=syn.FILENAME, mime="text/csv")
+
+    edited = st.data_editor(table, num_rows="dynamic", hide_index=True,
+                            key=f"syn_editor_{ss.get('syn_ver', 0)}",
+                            column_config={c: st.column_config.TextColumn() for c in table.columns})
+
+    if st.button("發佈", type="primary"):
+        content = syn.to_csv_bytes(edited)
+        try:
+            if gh:
+                gh.save(syn.FILENAME, content, ss.syn_sha, f"{editor} 更新同義詞表")
+                ss.syn_sha = gh.fetch(syn.FILENAME)[1]
+        except Exception as e:
+            if "ConflictError" in type(e).__name__:
+                st.error("有其他人剛更新過同義詞表。請重新整理頁面，在最新版本上再改一次。")
+            else:
+                st.error(f"發佈失敗，資料沒有變更：{e}")
+            return
+        with open(SYN_PATH, "wb") as f:
+            f.write(content)
+        # 換一個編輯器 key，讓表格以剛發佈的內容重新開始（避免新增列被重複套用）
+        ss.syn_ver = ss.get("syn_ver", 0) + 1
+        ss.syn_msg = f"✅ 已發佈，共 {len(syn.read_table(SYN_PATH))} 組同義詞。"
+        ss.syn_bytes = content
+        st.rerun()
+
+
 # ====================================================================== 導覽
-page = st.sidebar.radio("功能", ["🔍 商品查詢", "🛠 資料維護"])
+page = st.sidebar.radio("功能", ["🔍 商品查詢", "🛠 資料維護", "📖 同義詞表"])
 if page == "🔍 商品查詢":
     page_search()
-else:
+elif page == "🛠 資料維護":
     page_maintain()
+else:
+    page_synonyms()

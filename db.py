@@ -157,18 +157,24 @@ def _prepare_tokens(query: str) -> list[str]:
     return tokens
 
 
-def search(conn, cat, query: str, limit: int = 300) -> tuple[pd.DataFrame, bool]:
-    """每個關鍵字都必須出現（AND），但可以在任何一欄。回傳 (結果表, 是否被截斷)"""
+def search(conn, cat, query: str, limit: int = 300,
+           synonyms: dict | None = None) -> tuple[pd.DataFrame, bool]:
+    """每個關鍵字都必須出現（AND），但可以在任何一欄；有同義詞時任一寫法都算。回傳 (結果表, 是否被截斷)"""
     keys = [f["key"] for f in cat["fields"]]
     tokens = _prepare_tokens(query)
     if not tokens:
         return pd.DataFrame(columns=labels(cat)), False
 
     where, params = [], []
+    synonyms = synonyms or {}
     for t in tokens:
-        t = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        where.append("search_key LIKE ? ESCAPE '\\'")
-        params.append(f"%{t}%")
+        variants = synonyms.get(t, [t])          # 同義詞：任一寫法符合即可（OR）
+        ors = []
+        for v in variants:
+            v = v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            ors.append("search_key LIKE ? ESCAPE '\\'")
+            params.append(f"%{v}%")
+        where.append("(" + " OR ".join(ors) + ")")
     sql = f"SELECT {', '.join(keys)} FROM {cat['table']} WHERE {' AND '.join(where)} LIMIT ?"
     params.append(limit + 1)
     rows = conn.execute(sql, params).fetchall()
