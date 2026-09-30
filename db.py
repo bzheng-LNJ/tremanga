@@ -11,8 +11,14 @@ import re
 import sqlite3
 import unicodedata
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+
+def now_str() -> str:
+    """台灣時間（雲端主機預設是 UTC）"""
+    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ---------------------------------------------------------------- 文字處理
@@ -191,7 +197,7 @@ def upsert(conn, cat, records: list[dict]) -> tuple[int, int]:
         q = f"SELECT {pk} FROM {t} WHERE {pk} IN ({','.join('?' * len(chunk))})"
         existing.update(row[0] for row in conn.execute(q, chunk))
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_str()
     sets = ",\n".join(f"{k} = COALESCE(NULLIF(excluded.{k}, ''), {t}.{k})" for k in keys[1:])
     sql = f"""
         INSERT INTO {t} ({', '.join(keys)}, search_key, updated_at)
@@ -211,3 +217,29 @@ def upsert(conn, cat, records: list[dict]) -> tuple[int, int]:
     conn.commit()
     inserted = sum(1 for i in ids if i not in existing)
     return inserted, len(ids) - inserted
+
+
+# ---------------------------------------------------------------- 登錄紀錄
+LOG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS publish_log (
+    time      TEXT,
+    editor    TEXT,
+    filename  TEXT,
+    inserted  INTEGER,
+    updated   INTEGER
+)"""
+
+
+def add_log(conn, editor: str, filename: str, inserted: int, updated: int) -> None:
+    conn.execute(LOG_SCHEMA)
+    conn.execute("INSERT INTO publish_log VALUES (?, ?, ?, ?, ?)",
+                 (now_str(), editor, filename, inserted, updated))
+    conn.commit()
+
+
+def recent_logs(conn, limit: int = 20) -> pd.DataFrame:
+    conn.execute(LOG_SCHEMA)
+    rows = conn.execute(
+        "SELECT time, editor, filename, inserted, updated FROM publish_log "
+        "ORDER BY time DESC LIMIT ?", (limit,)).fetchall()
+    return pd.DataFrame(rows, columns=["時間", "登錄者", "檔案", "新增", "更新"])
