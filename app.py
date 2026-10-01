@@ -30,8 +30,9 @@ def db_path(cat_id: str) -> str:
 
 
 @st.cache_resource
-def get_conn(cat_id: str, _mtime):
-    # _mtime 讓 .db 被換掉（重新部署）時自動重開連線
+def get_conn(cat_id: str, mtime: float):
+    # mtime（檔案修改時間）讓 .db 被換掉或發佈後自動重開連線。
+    # 注意：參數名稱不能以底線開頭，否則 Streamlit 快取會忽略它。
     cat = CATEGORIES[cat_id]
     conn = db.connect(db_path(cat_id), cat)
     db.rebuild_search_keys(conn, cat)
@@ -47,7 +48,7 @@ SYN_PATH = os.path.join(BASE_DIR, syn.FILENAME)
 
 
 @st.cache_data
-def _synonym_lookup(_mtime):
+def _synonym_lookup(mtime: float):
     return syn.build_lookup(syn.read_table(SYN_PATH))
 
 
