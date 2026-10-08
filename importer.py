@@ -3,6 +3,7 @@ importer.py — 讀取出版社／廠商寄來的建檔檔案，依商品種類�
 
 欄位別名設定在 config.py；遇到新的欄位名稱，加到對應欄位的 aliases 就能自動辨識。
 """
+import csv
 import io
 import re
 
@@ -15,8 +16,30 @@ def _key(name) -> str:
     return db.normalize(name).replace(" ", "")
 
 
+def read_pasted(text: str) -> pd.DataFrame:
+    """
+    讀貼上的文字。從 Excel／Google 試算表複製貼上時欄位用 Tab 分隔；
+    沒有 Tab 時改用逗號，再沒有就用連續兩個以上的空格。
+    """
+    lines = [ln for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if ln.strip()]
+    if not lines:
+        return pd.DataFrame()
+    sample = "\n".join(lines[:20])
+    if "\t" in sample:
+        rows = [ln.split("\t") for ln in lines]
+    elif "," in sample:
+        rows = list(csv.reader(lines))
+    else:
+        rows = [re.split(r"\s{2,}|\u3000", ln.strip()) for ln in lines]
+    width = max(len(r) for r in rows)
+    rows = [[c.strip() or None for c in r] + [None] * (width - len(r)) for r in rows]
+    return pd.DataFrame(rows, dtype=str)
+
+
 def read_raw(file_bytes: bytes, filename: str, sheet=None) -> pd.DataFrame:
     """不指定表頭、全部當文字讀進來（避免 ISBN / JAN 被當成數字而變形）。"""
+    if filename.lower().endswith(".txt"):          # 貼上的文字
+        return read_pasted(file_bytes.decode("utf-8"))
     if filename.lower().endswith(".csv"):
         for enc in ("utf-8-sig", "cp950", "big5hkscs", "cp932", "utf-16"):
             try:
@@ -28,9 +51,64 @@ def read_raw(file_bytes: bytes, filename: str, sheet=None) -> pd.DataFrame:
 
 
 def sheet_names(file_bytes: bytes, filename: str) -> list[str]:
-    if filename.lower().endswith(".csv"):
+    if filename.lower().endswith((".csv", ".txt")):
         return []
     return pd.ExcelFile(io.BytesIO(file_bytes)).sheet_names
+
+
+def has_header(raw: pd.DataFrame, cat, scan: int = 30) -> bool:
+    """前幾列裡有沒有任何一格是已知的欄位名稱。"""
+    all_aliases = {_key(a) for f in cat["fields"] for a in f["aliases"]}
+    return any(_key(v) in all_aliases
+               for i in range(min(scan, len(raw))) for v in raw.iloc[i].tolist())
+
+
+def no_header(raw: pd.DataFrame) -> pd.DataFrame:
+    """沒有欄位名稱列時：欄名用「第1欄、第2欄…」，所有列都當資料。"""
+    df = raw.copy()
+    df.columns = [f"第{i + 1}欄" for i in range(len(df.columns))]
+    return df.dropna(how="all")
+
+
+def guess_mapping_by_content(df: pd.DataFrame, cat) -> dict:
+    """
+    沒有欄位名稱時，看內容猜欄位：
+    碼（ISBN/JAN）＝大多數格子能辨識成碼的欄；價格＝大多是 1～5 位數字的欄；
+    其餘文字欄依「平均長度」由長到短，依序對應設定裡的文字欄位（名稱通常最長）。
+    """
+    sample = df.head(50)
+    mapping = {f["key"]: None for f in cat["fields"] + cat.get("append", [])}
+    used = set()
+
+    def ratio(col, test):
+        vals = [v for v in sample[col].tolist() if db.clean_text(v)]
+        return sum(1 for v in vals if test(v)) / len(vals) if vals else 0
+
+    for f in cat["fields"]:
+        if f["kind"] in ("isbn", "jan"):
+            best = max((c for c in df.columns if c not in used),
+                       key=lambda c: ratio(c, lambda v: db.CLEANERS[f["kind"]](v)), default=None)
+            if best and ratio(best, lambda v: db.CLEANERS[f["kind"]](v)) >= 0.6:
+                mapping[f["key"]] = best
+                used.add(best)
+    for f in cat["fields"]:
+        if f["kind"] == "price":
+            test = lambda v: re.fullmatch(r"\d{1,5}(\.0+)?", db.clean_price(v) or "") is not None
+            best = max((c for c in df.columns if c not in used), key=lambda c: ratio(c, test), default=None)
+            if best and ratio(best, test) >= 0.6:
+                mapping[f["key"]] = best
+                used.add(best)
+
+    def avg_len(col):
+        vals = [db.clean_text(v) for v in sample[col].tolist() if db.clean_text(v)]
+        return sum(len(v) for v in vals) / len(vals) if vals else 0
+
+    text_cols = sorted((c for c in df.columns if c not in used and avg_len(c) > 0),
+                       key=avg_len, reverse=True)
+    text_fields = [f["key"] for f in cat["fields"] if f["kind"] == "text"]
+    if text_cols and text_fields:                 # 最長的欄位給名稱（書名／商品名稱）
+        mapping[text_fields[0]] = text_cols[0]
+    return mapping
 
 
 def detect_header_row(raw: pd.DataFrame, cat, scan: int = 30) -> int:

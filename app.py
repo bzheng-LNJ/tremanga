@@ -176,6 +176,17 @@ def _login() -> str | None:
     return None
 
 
+class PastedData:
+    """把貼上的文字包裝成跟上傳檔案一樣的介面（name、getvalue），後續流程共用。"""
+
+    def __init__(self, text: str):
+        self._data = text.encode("utf-8")
+        self.name = f"貼上資料_{hashlib.md5(self._data).hexdigest()[:6]}.txt"
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
 def _prepare_records(cat_id: str, cat, up):
     """讀檔 → 欄位對應 → 預覽。回傳 records；還不能匯入時回傳 None。"""
     data = up.getvalue()
@@ -187,14 +198,27 @@ def _prepare_records(cat_id: str, cat, up):
         st.error(f"讀不了這個檔案：{e}")
         return None
 
-    guess = importer.detect_header_row(raw, cat)
-    header_row = st.number_input(
-        "表頭在第幾列（欄位名稱那一列）", min_value=1, max_value=max(len(raw), 1), value=guess + 1
-    ) - 1
-    df = importer.apply_header(raw, header_row)
+    if raw.empty:
+        st.warning("沒有讀到任何資料。")
+        return None
+
+    headerless = st.checkbox(
+        "資料沒有欄位名稱列（第一列就是商品資料）",
+        value=not importer.has_header(raw, cat),
+        key=f"nohdr_{cat_id}_{up.name}",
+    )
+    if headerless:
+        df = importer.no_header(raw)
+        auto = importer.guess_mapping_by_content(df, cat)
+    else:
+        guess = importer.detect_header_row(raw, cat)
+        header_row = st.number_input(
+            "表頭在第幾列（欄位名稱那一列）", min_value=1, max_value=max(len(raw), 1), value=guess + 1
+        ) - 1
+        df = importer.apply_header(raw, header_row)
+        auto = importer.guess_mapping(list(df.columns), cat)
 
     st.markdown("**欄位對應**（系統先自動猜，不對的話用下拉選單改）")
-    auto = importer.guess_mapping(list(df.columns), cat)
     options = ["（不使用）"] + list(df.columns)
     mapping = {}
     for col, f in zip(st.columns(len(cat["fields"])), cat["fields"]):
@@ -251,7 +275,18 @@ def page_maintain():
     else:
         st.warning("尚未設定 GitHub 連線（Secrets 的 [github]），目前為下載模式：發佈後需手動上傳 .db 到 GitHub。")
 
-    up = st.file_uploader("上傳建檔檔案", type=["xlsx", "xls", "csv"], key=f"up_{cat_id}")
+    source = st.radio("資料來源", ["上傳檔案", "貼上文字"], horizontal=True, key=f"src_{cat_id}")
+    if source == "上傳檔案":
+        up = st.file_uploader("上傳建檔檔案", type=["xlsx", "xls", "csv"], key=f"up_{cat_id}")
+    else:
+        text = st.text_area(
+            "貼上資料",
+            height=220,
+            key=f"paste_{cat_id}",
+            placeholder="從 Excel、Google 試算表或信件內文複製後貼上。\n"
+                        "可以連欄位名稱列一起貼，也可以只貼資料。",
+        )
+        up = PastedData(text) if text.strip() else None
     if up is not None:
         records = _prepare_records(cat_id, cat, up)
         done_key = f"{cat_id}:{up.name}:{hashlib.md5(up.getvalue()).hexdigest()}"
