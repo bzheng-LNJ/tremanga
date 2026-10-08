@@ -16,6 +16,7 @@ import streamlit as st
 import db
 import importer
 import synonyms as syn
+import curation_page
 from config import CATEGORIES
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -123,20 +124,52 @@ def _empty_db_bytes(cat) -> bytes:
             return f.read()
 
 
-def _merge(db_bytes: bytes | None, cat, records, editor: str, filename: str):
+def _merge(db_bytes: bytes | None, cat, records, editor: str, filename: str, fill_only: bool = False):
     """把 records 併進 db 的複本，回傳 (新的 db bytes, 新增數, 更新數, 總筆數)"""
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "x.db")
         with open(p, "wb") as f:
             f.write(db_bytes or _empty_db_bytes(cat))
         conn = db.connect(p, cat)
-        inserted, updated = db.upsert(conn, cat, records)
+        inserted, updated = db.upsert(conn, cat, records, fill_only=fill_only)
         db.add_log(conn, editor, filename, inserted, updated)
         total = db.count(conn, cat)
         conn.execute("VACUUM")
         conn.close()
         with open(p, "rb") as f:
             return f.read(), inserted, updated, total
+
+
+def publish_db(cat_id: str, merge_fn, message: str):
+    """
+    共用的發佈流程：有 GitHub 設定就抓最新版合併後寫回（衝突自動重試），
+    沒有就在本機合併。成功後本機檔案也同步更新。回傳 merge_fn 的結果。
+    """
+    cat = CATEGORIES[cat_id]
+    gh = _github()
+    if gh:
+        result = gh.publish(cat["db"], merge_fn, message)
+    else:
+        p = db_path(cat_id)
+        cur = open(p, "rb").read() if os.path.exists(p) else None
+        result = merge_fn(cur)
+    with open(db_path(cat_id), "wb") as f:
+        f.write(result[0])
+    return result
+
+
+def edit_db_copy(db_bytes: bytes | None, cat, fn):
+    """在 db 的複本上執行 fn(conn)，回傳 (新的 db bytes, fn 的回傳值)。"""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "x.db")
+        with open(p, "wb") as f:
+            f.write(db_bytes or _empty_db_bytes(cat))
+        conn = db.connect(p, cat)
+        out = fn(conn)
+        conn.execute("VACUUM")
+        conn.close()
+        with open(p, "rb") as f:
+            return f.read(), out
 
 
 def _github():
@@ -189,6 +222,7 @@ class PastedData:
 
 def _prepare_records(cat_id: str, cat, up):
     """讀檔 → 欄位對應 → 預覽。回傳 records；還不能匯入時回傳 None。"""
+    ifields = [f for f in cat["fields"] if f.get("import", True)]
     data = up.getvalue()
     try:
         sheets = importer.sheet_names(data, up.name)
@@ -221,7 +255,7 @@ def _prepare_records(cat_id: str, cat, up):
     st.markdown("**欄位對應**（系統先自動猜，不對的話用下拉選單改）")
     options = ["（不使用）"] + list(df.columns)
     mapping = {}
-    for col, f in zip(st.columns(len(cat["fields"])), cat["fields"]):
+    for col, f in zip(st.columns(len(ifields)), ifields):
         with col:
             default = options.index(auto[f["key"]]) if auto[f["key"]] else 0
             choice = st.selectbox(f["label"], options, index=default,
@@ -229,7 +263,7 @@ def _prepare_records(cat_id: str, cat, up):
             mapping[f["key"]] = None if choice == "（不使用）" else choice
 
     for a in cat.get("append", []):
-        into = next(f["label"] for f in cat["fields"] if f["key"] == a["into"])
+        into = next(f["label"] for f in ifields if f["key"] == a["into"])
         default = options.index(auto[a["key"]]) if auto[a["key"]] else 0
         choice = st.selectbox(
             f"{a['label']}（檔案裡{a['label']}另外一欄時才指定，會接在{into}後面）",
@@ -237,13 +271,13 @@ def _prepare_records(cat_id: str, cat, up):
         mapping[a["key"]] = None if choice == "（不使用）" else choice
 
     fill_values = {}
-    for f in cat["fields"]:
+    for f in ifields:
         if f["key"] in cat["fill_in"] and not mapping[f["key"]]:
             fill_values[f["key"]] = st.text_input(
                 f"這個檔案沒有{f['label']}欄位，請填{f['label']}（會套用到全部商品）",
                 key=f"fill_{cat_id}_{f['key']}")
 
-    labels = {f["key"]: f["label"] for f in cat["fields"]}
+    labels = {f["key"]: f["label"] for f in ifields}
     lacking = [labels[k] for k in cat["required"] if not mapping[k]]
     if lacking:
         st.warning(f"{'、'.join(lacking)} 一定要指定。")
@@ -292,10 +326,19 @@ def page_maintain():
         done_key = f"{cat_id}:{up.name}:{hashlib.md5(up.getvalue()).hexdigest()}"
         already = done_key in ss.get("published", {})
 
+        fill_only = False
+        if records and not already:
+            fill_only = st.radio(
+                "已經登錄過的商品",
+                ["有新資料就更新", "只補上空白的欄位"],
+                horizontal=True, key=f"mode_{cat_id}",
+                help="選「只補上空白的欄位」時，已登錄商品原本有值的欄位（例如品名、售價）一律不會被改動。",
+            ) == "只補上空白的欄位"
+
         if already:
             st.success(ss.published[done_key])
         elif records and st.button("發佈", type="primary", key=f"pub_{cat_id}"):
-            merge_fn = lambda cur: _merge(cur, cat, records, editor, up.name)
+            merge_fn = lambda cur: _merge(cur, cat, records, editor, up.name, fill_only)
             try:
                 with st.spinner("發佈中…"):
                     if gh:
@@ -380,10 +423,15 @@ def page_synonyms():
 
 
 # ====================================================================== 導覽
-page = st.sidebar.radio("功能", ["🔍 商品查詢", "🛠 資料維護", "📖 同義詞表"])
+page = st.sidebar.radio("功能", ["🔍 商品查詢", "🛠 資料維護", "📖 同義詞表", "🏷 商品整理"])
 if page == "🔍 商品查詢":
     page_search()
 elif page == "🛠 資料維護":
     page_maintain()
-else:
+elif page == "📖 同義詞表":
     page_synonyms()
+else:
+    curation_page.render({
+        "login": _login, "github": _github, "current_conn": current_conn,
+        "publish_db": publish_db, "edit_db_copy": edit_db_copy, "base_dir": BASE_DIR,
+    })
