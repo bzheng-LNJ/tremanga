@@ -79,6 +79,8 @@ def clean_price(raw) -> str:
     t = re.sub(r"(nt\$|nt|\$|¥|円|元|,|\s)", "", normalize(s))
     try:
         v = float(t)
+        if v == 0:                # 價格 0 視為「沒有資料」，以免蓋掉正確售價
+            return ""
         return str(int(v)) if v == int(v) else str(v)
     except ValueError:
         return s
@@ -94,6 +96,22 @@ def key_field(cat) -> str:
 
 def labels(cat) -> list[str]:
     return [f["label"] for f in cat["fields"]]
+
+
+def field_label(cat, key: str) -> str:
+    return next(f["label"] for f in cat["fields"] if f["key"] == key)
+
+
+def display_keys(cat) -> list[str]:
+    """查詢結果要顯示的欄位（依設定的 display 順序；沒設定就照欄位順序，略過 show=False）。"""
+    if cat.get("display"):
+        return list(cat["display"])
+    return [f["key"] for f in cat["fields"] if f.get("show", True)]
+
+
+def import_keys(cat) -> list[str]:
+    """建檔檔案匯入時會寫入的欄位。"""
+    return [f["key"] for f in cat["fields"] if f.get("import", True)]
 
 
 def _search_fields(cat) -> list[str]:
@@ -160,10 +178,11 @@ def _prepare_tokens(query: str) -> list[str]:
 def search(conn, cat, query: str, limit: int = 300,
            synonyms: dict | None = None) -> tuple[pd.DataFrame, bool]:
     """每個關鍵字都必須出現（AND），但可以在任何一欄；有同義詞時任一寫法都算。回傳 (結果表, 是否被截斷)"""
-    keys = [f["key"] for f in cat["fields"]]
+    keys = display_keys(cat)
+    cols = [field_label(cat, k) for k in keys]
     tokens = _prepare_tokens(query)
     if not tokens:
-        return pd.DataFrame(columns=labels(cat)), False
+        return pd.DataFrame(columns=cols), False
 
     where, params = [], []
     synonyms = synonyms or {}
@@ -181,19 +200,30 @@ def search(conn, cat, query: str, limit: int = 300,
 
     truncated = len(rows) > limit
     rows = rows[:limit]
-    rows.sort(key=lambda r: (_natural_key(r[1]), r[0]))
-    return pd.DataFrame(rows, columns=labels(cat)), truncated
+    sort_i = keys.index(cat.get("sort_key", cat["fields"][1]["key"]))
+    pk_i = keys.index(key_field(cat)) if key_field(cat) in keys else 0
+    rows.sort(key=lambda r: (_natural_key(r[sort_i]), r[pk_i]))
+    return pd.DataFrame(rows, columns=cols), truncated
+
+
+def fetch_all(conn, cat) -> pd.DataFrame:
+    """整張表（欄名用英文 key），商品整理頁用。"""
+    keys = [f["key"] for f in cat["fields"]]
+    rows = conn.execute(f"SELECT {', '.join(keys)} FROM {cat['table']}").fetchall()
+    return pd.DataFrame(rows, columns=keys)
 
 
 # ---------------------------------------------------------------- 寫入
-def upsert(conn, cat, records: list[dict]) -> tuple[int, int]:
+def upsert(conn, cat, records: list[dict], fill_only: bool = False) -> tuple[int, int]:
     """
     已存在的碼會更新；新檔案裡某欄空白時，保留資料庫原本的值。
+    fill_only=True：已存在的商品只補上原本空白的欄位，有值的一律不動。
+    只寫入「匯入欄位」，商品整理頁填的標準欄位不會被動到。
     回傳 (新增筆數, 更新筆數)
     """
     if not records:
         return 0, 0
-    t, keys = cat["table"], [f["key"] for f in cat["fields"]]
+    t, keys = cat["table"], import_keys(cat)
     pk = keys[0]
     ids = list({r[pk] for r in records})
 
@@ -204,7 +234,11 @@ def upsert(conn, cat, records: list[dict]) -> tuple[int, int]:
         existing.update(row[0] for row in conn.execute(q, chunk))
 
     now = now_str()
-    sets = ",\n".join(f"{k} = COALESCE(NULLIF(excluded.{k}, ''), {t}.{k})" for k in keys[1:])
+    if fill_only:
+        sets = ",\n".join(f"{k} = CASE WHEN {t}.{k} = '' THEN excluded.{k} ELSE {t}.{k} END"
+                          for k in keys[1:])
+    else:
+        sets = ",\n".join(f"{k} = COALESCE(NULLIF(excluded.{k}, ''), {t}.{k})" for k in keys[1:])
     sql = f"""
         INSERT INTO {t} ({', '.join(keys)}, search_key, updated_at)
         VALUES ({', '.join('?' * len(keys))}, '', ?)
@@ -213,16 +247,44 @@ def upsert(conn, cat, records: list[dict]) -> tuple[int, int]:
         updated_at = excluded.updated_at"""
     conn.executemany(sql, [tuple(r.get(k, "") for k in keys) + (now,) for r in records])
 
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        q = f"SELECT {', '.join(keys)} FROM {t} WHERE {pk} IN ({','.join('?' * len(chunk))})"
-        updates = [(_make_search_key(dict(zip(keys, r)), cat), r[0])
-                   for r in conn.execute(q, chunk).fetchall()]
-        conn.executemany(f"UPDATE {t} SET search_key = ? WHERE {pk} = ?", updates)
-
+    _refresh_search_keys(conn, cat, ids)
     conn.commit()
     inserted = sum(1 for i in ids if i not in existing)
     return inserted, len(ids) - inserted
+
+
+def _refresh_search_keys(conn, cat, ids: list[str]) -> None:
+    t, allk = cat["table"], [f["key"] for f in cat["fields"]]
+    pk = allk[0]
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        q = f"SELECT {', '.join(allk)} FROM {t} WHERE {pk} IN ({','.join('?' * len(chunk))})"
+        updates = [(_make_search_key(dict(zip(allk, r)), cat), r[0])
+                   for r in conn.execute(q, chunk).fetchall()]
+        conn.executemany(f"UPDATE {t} SET search_key = ? WHERE {pk} = ?", updates)
+
+
+def update_fields(conn, cat, rows: list[dict]) -> int:
+    """
+    直接把指定欄位設成指定的值（空白也照寫，可以清掉錯誤的值）。
+    rows 每筆要有主鍵，其他 key 就是要更新的欄位。回傳實際更新筆數。
+    """
+    t, pk = cat["table"], key_field(cat)
+    valid = {f["key"] for f in cat["fields"]} - {pk}
+    now, n = now_str(), 0
+    for r in rows:
+        cols = [k for k in r if k in valid]
+        if not cols:
+            continue
+        sql = f"UPDATE {t} SET {', '.join(f'{k} = ?' for k in cols)}, updated_at = ? WHERE {pk} = ?"
+        n += conn.execute(sql, [db_str(r[k]) for k in cols] + [now, r[pk]]).rowcount
+    _refresh_search_keys(conn, cat, [r[pk] for r in rows])
+    conn.commit()
+    return n
+
+
+def db_str(v) -> str:
+    return clean_text(v)
 
 
 # ---------------------------------------------------------------- 登錄紀錄

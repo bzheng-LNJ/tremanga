@@ -12,6 +12,11 @@ import pandas as pd
 import db
 
 
+def _ifields(cat) -> list[dict]:
+    """建檔檔案會匯入的欄位（商品整理頁專用的標準欄位不在這裡）。"""
+    return [f for f in cat["fields"] if f.get("import", True)]
+
+
 def _key(name) -> str:
     return db.normalize(name).replace(" ", "")
 
@@ -58,7 +63,7 @@ def sheet_names(file_bytes: bytes, filename: str) -> list[str]:
 
 def has_header(raw: pd.DataFrame, cat, scan: int = 30) -> bool:
     """前幾列裡有沒有任何一格是已知的欄位名稱。"""
-    all_aliases = {_key(a) for f in cat["fields"] for a in f["aliases"]}
+    all_aliases = {_key(a) for f in _ifields(cat) for a in f["aliases"]}
     return any(_key(v) in all_aliases
                for i in range(min(scan, len(raw))) for v in raw.iloc[i].tolist())
 
@@ -77,21 +82,21 @@ def guess_mapping_by_content(df: pd.DataFrame, cat) -> dict:
     其餘文字欄依「平均長度」由長到短，依序對應設定裡的文字欄位（名稱通常最長）。
     """
     sample = df.head(50)
-    mapping = {f["key"]: None for f in cat["fields"] + cat.get("append", [])}
+    mapping = {f["key"]: None for f in _ifields(cat) + cat.get("append", [])}
     used = set()
 
     def ratio(col, test):
         vals = [v for v in sample[col].tolist() if db.clean_text(v)]
         return sum(1 for v in vals if test(v)) / len(vals) if vals else 0
 
-    for f in cat["fields"]:
+    for f in _ifields(cat):
         if f["kind"] in ("isbn", "jan"):
             best = max((c for c in df.columns if c not in used),
                        key=lambda c: ratio(c, lambda v: db.CLEANERS[f["kind"]](v)), default=None)
             if best and ratio(best, lambda v: db.CLEANERS[f["kind"]](v)) >= 0.6:
                 mapping[f["key"]] = best
                 used.add(best)
-    for f in cat["fields"]:
+    for f in _ifields(cat):
         if f["kind"] == "price":
             test = lambda v: re.fullmatch(r"\d{1,5}(\.0+)?", db.clean_price(v) or "") is not None
             best = max((c for c in df.columns if c not in used), key=lambda c: ratio(c, test), default=None)
@@ -105,7 +110,7 @@ def guess_mapping_by_content(df: pd.DataFrame, cat) -> dict:
 
     text_cols = sorted((c for c in df.columns if c not in used and avg_len(c) > 0),
                        key=avg_len, reverse=True)
-    text_fields = [f["key"] for f in cat["fields"] if f["kind"] == "text"]
+    text_fields = [f["key"] for f in _ifields(cat) if f["kind"] == "text"]
     if text_cols and text_fields:                 # 最長的欄位給名稱（書名／商品名稱）
         mapping[text_fields[0]] = text_cols[0]
     return mapping
@@ -113,7 +118,7 @@ def guess_mapping_by_content(df: pd.DataFrame, cat) -> dict:
 
 def detect_header_row(raw: pd.DataFrame, cat, scan: int = 30) -> int:
     """前幾列中命中最多欄位別名的那一列就是表頭。回傳 0 起算的列號。"""
-    all_aliases = {_key(a) for f in cat["fields"] for a in f["aliases"]}
+    all_aliases = {_key(a) for f in _ifields(cat) for a in f["aliases"]}
     best_row, best_hits = 0, 0
     for i in range(min(scan, len(raw))):
         hits = sum(1 for v in raw.iloc[i].tolist() if _key(v) in all_aliases)
@@ -142,7 +147,7 @@ def guess_mapping(columns: list[str], cat) -> dict:
     keyed = {_key(c): c for c in columns}
     return {
         f["key"]: next((keyed[_key(a)] for a in f["aliases"] if _key(a) in keyed), None)
-        for f in cat["fields"] + cat.get("append", [])
+        for f in _ifields(cat) + cat.get("append", [])
     }
 
 
@@ -169,12 +174,12 @@ def build_records(df: pd.DataFrame, mapping: dict, cat, fill_values: dict | None
     """回傳 (records, 被略過的列 DataFrame)"""
     fill_values = fill_values or {}
     pk = db.key_field(cat)
-    labels = {f["key"]: f["label"] for f in cat["fields"]}
+    labels = {f["key"]: f["label"] for f in _ifields(cat)}
     records, skipped = {}, []
 
     for idx, row in df.iterrows():
         rec = {}
-        for f in cat["fields"]:
+        for f in _ifields(cat):
             col = mapping.get(f["key"])
             raw = row[col] if col else None
             val = db.CLEANERS[f["kind"]](raw) if col else ""
