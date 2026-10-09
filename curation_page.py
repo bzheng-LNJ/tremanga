@@ -5,7 +5,7 @@ curation_page.py — 🏷 商品整理頁（畫面）。規則邏輯在 curation
   上方篩選（原始廠商、整理狀態、關鍵字）
   ① 整理與確認：系統依規則推測標準欄位 → 人在表格裡修正 → 勾選 → 發佈
   ② 規則表：新增／修改規則（未發佈的修改也會立刻反映在 ① 的推測裡，方便試）
-  ③ 候選清單：原始廠商、共通分類、品名開頭的統計，幫忙決定要加哪些規則
+  ③ 候選清單：原始廠商、條碼開頭、品名開頭的統計，幫忙決定要加哪些規則
 
 ctx 由 app.py 傳入：login、github、current_conn、publish_db、edit_db_copy、base_dir
 """
@@ -19,7 +19,7 @@ import curation as cu
 import db
 from config import CATEGORIES
 
-STD = list(cu.FIELDS.items())            # [(畫面名稱, key), ...]
+STD = [("品名", "title")] + list(cu.FIELDS.items())     # [(畫面名稱, key), ...]
 SHOW_LIMIT = 500
 
 
@@ -107,7 +107,6 @@ def _confirm_tab(ss, ctx, cat_id, cat, editor, view, rules):
             else:
                 rec[label] = prop.get(key) or item[key]
         rec["推測依據"] = why
-        rec["品番"] = item["model"]
         rec["共通分類"] = item["category"]
         table.append(rec)
     df = pd.DataFrame(table)
@@ -115,10 +114,11 @@ def _confirm_tab(ss, ctx, cat_id, cat, editor, view, rules):
     def opts(base, col):
         return sorted(set(base) | {v for v in df[col] if v}) + [""]
 
-    locked = ["狀態", "JAN", "原始品名", "推測依據", "品番", "共通分類"]
+    locked = ["狀態", "JAN", "原始品名", "推測依據", "共通分類"]
     cfg = {c: st.column_config.TextColumn(disabled=True) for c in locked}
     cfg["原始品名"] = st.column_config.TextColumn(disabled=True, width="large")
     cfg["確認"] = st.column_config.CheckboxColumn(width="small")
+    cfg["品名"] = st.column_config.TextColumn(width="large", help="原始品名去掉已拆到其他欄位的文字，可直接修改")
     cfg["類型"] = st.column_config.SelectboxColumn(options=opts(cu.TYPES, "類型"))
     cfg["顏色"] = st.column_config.SelectboxColumn(options=opts(cu.COLORS, "顏色"))
 
@@ -236,10 +236,11 @@ def _candidates_tab(ss, view, rules, rules_df):
         mk["已有規則"] = mk["原始廠商"].map(lambda m: cu.covered(m, rules, "maker", "raw_maker"))
         st.dataframe(mk, hide_index=True, use_container_width=True)
     with right:
-        st.markdown("**共通分類** → 用來加「類型」規則")
-        ct = view["category"].value_counts().rename_axis("共通分類").reset_index(name="商品數")
-        ct["已有規則"] = ct["共通分類"].map(lambda m: cu.covered(m, rules, "type", "category"))
-        st.dataframe(ct, hide_index=True, use_container_width=True)
+        st.markdown("**條碼開頭（前 7 碼）** → 用來加「廠商」規則（比對來源選「條碼」）")
+        jp = cu.jan_prefix_candidates(view["jan"].tolist(), view["name"].tolist())
+        jp["已有規則"] = jp["條碼開頭"].map(lambda j: cu.covered(j, rules, "maker", "jan"))
+        st.dataframe(jp, hide_index=True, use_container_width=True)
+        st.caption("同一個廠商在不同國家的商品，條碼開頭可能不同，請看品名範例確認。")
 
     st.markdown("**品名開頭** → 用來加「系列」規則（出現 2 次以上的才列出）")
     only_new = st.checkbox("只顯示還沒有系列規則的", value=True)

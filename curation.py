@@ -2,25 +2,29 @@
 curation.py — 商品整理的規則邏輯（不含畫面）。
 
 規則表 curation_rules.csv，每一列是一條規則：
-    欄位      要填哪個標準欄位：廠商／系列／類型／特別版／粗細／顏色／包裝／備註
+    欄位      要填哪個標準欄位：廠商／系列／類型／特別版／粗細／顏色／備註
     值        要填入的值，例如 Juice
-    比對來源  拿哪一欄來比對：品名／原始廠商／共通分類／品番
-    關鍵字    比對來源「包含」這段文字就套用；多個寫法用 | 分隔，例如 ジュース|juice
+    比對來源  拿哪一欄來比對：品名／原始廠商／條碼
+    關鍵字    品名、原始廠商：「包含」這段文字就套用；條碼：「開頭是」這段數字就套用。
+              多個寫法用 | 分隔，例如 ジュース|juice
     限定廠商  （可空白）只套用在這個廠商的商品，例如 PILOT
     說明      （可空白）給人看的備註
 
 同一個欄位有多條規則符合時，依序比較：
     1. 有「限定廠商」的優先
-    2. 比對來源是品名／品番的，優先於原始廠商／共通分類
-       （例：共通分類說是原子筆，但品名有「カートリッジ」→ 以品名規則的「替芯」為準）
+    2. 比對來源是品名的，優先於原始廠商／條碼
     3. 關鍵字越長越優先（「ブルーブラック」勝過「ブルー」）
 比對時不分全形半形、大小寫，也忽略空格。
 
-粗細、包裝在沒有規則符合時，會自動從品名判讀（例：0.5mm → 0.5、10色セット → 10 色組）。
+粗細在沒有規則符合時，會自動從品名判讀（例：0.5mm → 0.5）。
+
+整理後品名：原始品名去掉「已經拆到廠商、系列、特別版、粗細、顏色欄位」的文字。
+例：エナージェル カワイイコレクション 第9弾 にこにこ → にこにこ
 """
 import io
 import os
 import re
+import unicodedata
 
 import pandas as pd
 
@@ -31,9 +35,11 @@ COLUMNS = ["欄位", "值", "比對來源", "關鍵字", "限定廠商", "說明
 
 # 標準欄位：畫面名稱 ↔ 資料庫欄位
 FIELDS = {"廠商": "maker", "系列": "series", "類型": "type", "特別版": "edition",
-          "粗細": "size", "顏色": "color", "包裝": "pack", "備註": "note"}
-SOURCES = {"品名": "name", "品番": "model", "原始廠商": "raw_maker", "共通分類": "category"}
-SOURCE_PRIORITY = {"name": 2, "model": 2, "raw_maker": 1, "category": 1}
+          "粗細": "size", "顏色": "color", "備註": "note"}
+SOURCES = {"品名": "name", "原始廠商": "raw_maker", "條碼": "jan"}
+SOURCE_PRIORITY = {"name": 2, "raw_maker": 1, "jan": 1}
+# 這些欄位填好後，品名裡相同的文字會被拿掉（類型、備註不拿，避免品名失去意思）
+STRIP_FROM_TITLE = ["maker", "series", "edition", "size", "color"]
 
 # 草案的標準值清單（下拉選單用；清單外的值也可以手動輸入到規則表）
 TYPES = ["鋼珠筆", "原子筆", "中性筆", "鋼筆", "自動鉛筆", "鉛筆", "螢光筆", "簽字筆",
@@ -111,8 +117,6 @@ def compile_rules(df: pd.DataFrame) -> list[dict]:
 # ---------------------------------------------------------------- 自動判讀
 _SIZE_MM = re.compile(r"(\d+(?:\.\d+)?)\s*(?:mm|ミリ|㎜|毫米)", re.I)
 _SIZE_BARE = re.compile(r"(?<![\d.])(0\.\d{1,2}|[12]\.\d)(?![\d.])")
-_PACK_COLOR = re.compile(r"(\d+)\s*色\s*(?:セット|組|入|パック|set)", re.I)
-_PACK_PIECE = re.compile(r"(\d+)\s*(?:本|支)\s*(?:セット|組|入|パック|set)", re.I)
 
 
 def guess_size(name: str) -> str:
@@ -127,15 +131,6 @@ def guess_size(name: str) -> str:
     return "/".join(found)
 
 
-def guess_pack(name: str) -> str:
-    s = db.normalize(name)
-    if m := _PACK_COLOR.search(s):
-        return f"{int(m.group(1))} 色組"
-    if m := _PACK_PIECE.search(s):
-        return f"{int(m.group(1))} 支組"
-    return ""
-
-
 # ---------------------------------------------------------------- 套用規則
 def _best(rules: list[dict], field: str, item: dict, maker: str):
     """回傳 (最優先的規則, 命中的關鍵字)；沒有就 (None, "")。"""
@@ -146,7 +141,10 @@ def _best(rules: list[dict], field: str, item: dict, maker: str):
         if r["maker"] and r["maker"] != _n(maker):
             continue
         text = _n(item.get(r["source"], ""))
-        hits = [k for k in r["keywords"] if k in text]
+        if r["source"] == "jan":
+            hits = [k for k in r["keywords"] if text.startswith(k)]
+        else:
+            hits = [k for k in r["keywords"] if k in text]
         if not hits:
             continue
         kw = max(hits, key=len)
@@ -156,29 +154,67 @@ def _best(rules: list[dict], field: str, item: dict, maker: str):
     return best, best_kw
 
 
+def _loose_pattern(kw: str) -> re.Pattern:
+    """關鍵字（已正規化、無空白）→ 允許字和字之間夾空白、不分大小寫的比對式。"""
+    return re.compile(r"\s*".join(re.escape(ch) for ch in kw), re.I)
+
+
+_EMPTY_BRACKETS = re.compile(r"[(\[【「『][\s\-・/,、]*[)\]】」』]")
+_EDGE = " \t-‐–—・/／_,、。:："
+
+
+def clean_title(name: str, remove: list[str]) -> str:
+    """從品名拿掉 remove 裡的文字（長的先拿），再整理空白和多餘符號。"""
+    t = unicodedata.normalize("NFKC", db.clean_text(name))
+    for kw in sorted({k for k in remove if k}, key=len, reverse=True):
+        t = _loose_pattern(kw).sub(" ", t)
+    for _ in range(2):
+        t = _EMPTY_BRACKETS.sub(" ", t)
+    t = re.sub(r"\s*([\-・/／])\s*([\-・/／]\s*)+", r" \1 ", t)   # 連續的分隔符號只留一個
+    t = re.sub(r"\s+", " ", t).strip(_EDGE)
+    return t
+
+
 def propose(item: dict, rules: list[dict]) -> tuple[dict, str]:
     """
-    依規則推測一件商品的標準欄位。
-    回傳 ({欄位 key: 值}, 依據說明)；推測不出來的欄位不會出現在結果裡。
+    依規則推測一件商品的標準欄位與整理後品名。
+    回傳 ({欄位 key: 值}, 依據說明)；推測不出來的欄位不會出現在結果裡（品名一定有）。
     """
-    out, why = {}, []
+    out, why, remove = {}, [], []
+    name_n = _n(item.get("name", ""))
+
+    def strip_words(rule):
+        """這條規則的關鍵字和填入的值，凡是出現在品名裡的都列入要拿掉的文字。"""
+        for k in rule["keywords"] + [_n(rule["value"])]:
+            if k and k in name_n:
+                remove.append(k)
+
     r, kw = _best(rules, "maker", item, "")
     if r:
         out["maker"] = r["value"]
         why.append(f"廠商←{kw}")
+        strip_words(r)
     maker = out.get("maker") or item.get("maker", "")
 
-    for field in ["series", "type", "edition", "size", "color", "pack", "note"]:
+    for field in ["series", "type", "edition", "size", "color", "note"]:
         r, kw = _best(rules, field, item, maker)
         if r:
             out[field] = r["value"]
             why.append(f"{r['label']}←{kw}")
-        elif field == "size" and (v := guess_size(item.get("name", ""))):
-            out[field] = v
-            why.append(f"粗細←自動({v})")
-        elif field == "pack" and (v := guess_pack(item.get("name", ""))):
-            out[field] = v
-            why.append(f"包裝←自動({v})")
+            if field in STRIP_FROM_TITLE:
+                strip_words(r)
+        elif field == "size":
+            s = db.normalize(item.get("name", ""))
+            found = [m for m in list(_SIZE_MM.finditer(s)) + list(_SIZE_BARE.finditer(s))
+                     if 0.1 <= float(m.group(1)) <= 30]
+            if found:
+                out["size"] = guess_size(item.get("name", ""))
+                why.append(f"粗細←自動({out['size']})")
+                remove.extend(_n(m.group(0)) for m in found)
+
+    title = clean_title(item.get("name", ""), remove)
+    # 品名整個被拆光時（例：「トラディオ プラマン 赤」），用類型或系列頂替，避免品名空白
+    out["title"] = title or out.get("type") or out.get("series") or ""
     return out, "；".join(why)
 
 
@@ -217,5 +253,20 @@ def prefix_candidates(names: list[str], min_count: int = 2) -> pd.DataFrame:
 def covered(text: str, rules: list[dict], field: str, source: str) -> bool:
     """這段文字是否已經有某條規則會命中。"""
     t = _n(text)
+    if source == "jan":
+        return any(r["field"] == field and r["source"] == "jan"
+                   and any(t.startswith(k) or k.startswith(t) for k in r["keywords"]) for r in rules)
     return any(r["field"] == field and r["source"] == source and any(k in t for k in r["keywords"])
                for r in rules)
+
+
+def jan_prefix_candidates(jans: list[str], names: list[str], digits: int = 7) -> pd.DataFrame:
+    """條碼開頭（預設前 7 碼，約等於廠商代碼）的統計，給「廠商」規則當參考。"""
+    counts, examples = {}, {}
+    for j, n in zip(jans, names):
+        p = str(j)[:digits]
+        counts[p] = counts.get(p, 0) + 1
+        examples.setdefault(p, n)
+    df = pd.DataFrame([{"條碼開頭": k, "商品數": v, "品名範例": examples[k]} for k, v in counts.items()],
+                      columns=["條碼開頭", "商品數", "品名範例"])
+    return df.sort_values("商品數", ascending=False).reset_index(drop=True)

@@ -80,12 +80,13 @@ CATEGORIES = {
              "aliases": ["共通分類", "分類"]},
             # ---- 標準欄位（商品整理頁填寫，匯入時不會被覆蓋）
             {"key": "maker", "label": "廠商", "kind": "text", "import": False},
+            # 整理後品名：原始品名去掉已經拆到其他欄位的部分（之後統一成中文名稱也放這裡）
+            {"key": "title", "label": "品名", "kind": "text", "import": False},
             {"key": "series", "label": "系列", "kind": "text", "import": False},
             {"key": "type", "label": "類型", "kind": "text", "import": False},
             {"key": "edition", "label": "特別版", "kind": "text", "import": False},
             {"key": "size", "label": "粗細", "kind": "text", "import": False},
             {"key": "color", "label": "顏色", "kind": "text", "import": False},
-            {"key": "pack", "label": "包裝", "kind": "text", "import": False},
             {"key": "note", "label": "備註", "kind": "text", "import": False},
             {"key": "curated_by", "label": "整理者", "kind": "text", "import": False,
              "search": False, "show": False},
@@ -93,9 +94,10 @@ CATEGORIES = {
              "search": False, "show": False},
         ],
         # 查詢結果的欄位順序
-        "display": ["maker", "series", "type", "edition", "size", "color", "pack",
-                    "price", "jan", "name", "note"],
-        "sort_key": "name",
+        "display": ["maker", "jan", "title", "series", "size", "color", "edition"],
+        # 查詢結果的「品名」：有整理後品名就顯示它，還沒整理的顯示原始品名
+        "display_fallback": {"title": "name"},
+        "sort_key": "title",
         "curation": True,
         "required": ["jan", "name"],
         "fill_in": [],

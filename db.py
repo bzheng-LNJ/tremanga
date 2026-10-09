@@ -194,7 +194,9 @@ def search(conn, cat, query: str, limit: int = 300,
             ors.append("search_key LIKE ? ESCAPE '\\'")
             params.append(f"%{v}%")
         where.append("(" + " OR ".join(ors) + ")")
-    sql = f"SELECT {', '.join(keys)} FROM {cat['table']} WHERE {' AND '.join(where)} LIMIT ?"
+    fb = cat.get("display_fallback", {})
+    exprs = [f"COALESCE(NULLIF({k}, ''), {fb[k]})" if k in fb else k for k in keys]
+    sql = f"SELECT {', '.join(exprs)} FROM {cat['table']} WHERE {' AND '.join(where)} LIMIT ?"
     params.append(limit + 1)
     rows = conn.execute(sql, params).fetchall()
 
