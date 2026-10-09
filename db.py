@@ -119,7 +119,12 @@ def _search_fields(cat) -> list[str]:
 
 
 def _make_search_key(values: dict, cat) -> str:
-    return " ".join(normalize(values.get(k, "")) for k in _search_fields(cat))
+    parts = [normalize(values.get(k, "")) for k in _search_fields(cat)]
+    # 品番這類代碼：另外存一份去掉連字號、空白的寫法，打「SLW11PCT」也查得到「SLW11P-CT」
+    for f in cat["fields"]:
+        if f.get("code") and values.get(f["key"]):
+            parts.append(re.sub(r"[^0-9a-z]", "", normalize(values[f["key"]])))
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------- 連線與建表

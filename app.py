@@ -89,7 +89,9 @@ def page_search():
     else:
         st.success(f"找到 {len(df)} 筆")
 
-    widths = {f["label"]: ("large" if i == 1 else "small" if f["kind"] == "price" else "medium")
+    preset = cat.get("widths", {})
+    widths = {f["label"]: preset.get(f["key"]) or
+              ("large" if i == 1 else "small" if f["kind"] == "price" else "medium")
               for i, f in enumerate(cat["fields"])}
     event = st.dataframe(
         df,

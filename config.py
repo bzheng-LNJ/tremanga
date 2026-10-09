@@ -72,7 +72,7 @@ CATEGORIES = {
              "aliases": ["商品名稱", "商品名", "品名", "名稱", "原始品名"]},
             {"key": "price", "label": "售價", "kind": "price", "search": False,
              "aliases": ["售價", "店頭価格", "店頭価格(円)", "店頭賣價", "定價", "賣價", "價格", "建議售價"]},
-            {"key": "model", "label": "品番", "kind": "text",
+            {"key": "model", "label": "品番", "kind": "text", "code": True,
              "aliases": ["品番", "型番", "型號", "品號"]},
             {"key": "raw_maker", "label": "原始廠商", "kind": "text",
              "aliases": ["出版社・メーカー", "出版社･メーカー", "メーカー", "メーカー名", "廠商", "品牌"]},
@@ -94,14 +94,17 @@ CATEGORIES = {
              "search": False, "show": False},
         ],
         # 查詢結果的欄位順序
-        "display": ["maker", "jan", "title", "series", "size", "color", "edition"],
+        "display": ["model", "jan", "title", "series", "size", "color", "edition"],
+        # 查詢結果的欄寬：small／medium／large（沒寫的欄位用 medium）
+        "widths": {"model": "medium", "jan": "medium", "title": "large", "series": "medium",
+                   "size": "small", "color": "small", "edition": "medium"},
         # 查詢結果的「品名」：有整理後品名就顯示它，還沒整理的顯示原始品名
         "display_fallback": {"title": "name"},
         "sort_key": "title",
         "curation": True,
         "required": ["jan", "name"],
         "fill_in": [],
-        "placeholder": "廠商、系列、商品名稱或 JAN，例如：飛龍 energel",
+        "placeholder": "品番、品名、系列、廠商或 JAN，例如：BLN75 或 飛龍 energel",
     },
     "goods": {
         "label": "周邊",

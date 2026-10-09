@@ -100,7 +100,7 @@ def _confirm_tab(ss, ctx, cat_id, cat, editor, view, rules):
         prop, why = cu.propose(item, rules)
         curated = bool(item["curated_at"])
         rec = {"確認": check_all, "狀態": "已整理" if curated else "未整理",
-               "JAN": item["jan"], "原始品名": item["name"]}
+               "品番": item["model"], "JAN": item["jan"], "原始品名": item["name"]}
         for label, key in STD:
             if curated and not reapply:
                 rec[label] = item[key]
@@ -114,13 +114,14 @@ def _confirm_tab(ss, ctx, cat_id, cat, editor, view, rules):
     def opts(base, col):
         return sorted(set(base) | {v for v in df[col] if v}) + [""]
 
-    locked = ["狀態", "JAN", "原始品名", "推測依據", "共通分類"]
+    locked = ["狀態", "品番", "JAN", "原始品名", "推測依據", "共通分類"]
     cfg = {c: st.column_config.TextColumn(disabled=True) for c in locked}
     cfg["原始品名"] = st.column_config.TextColumn(disabled=True, width="large")
     cfg["確認"] = st.column_config.CheckboxColumn(width="small")
+    cfg["粗細"] = st.column_config.TextColumn(width="small")
     cfg["品名"] = st.column_config.TextColumn(width="large", help="原始品名去掉已拆到其他欄位的文字，可直接修改")
     cfg["類型"] = st.column_config.SelectboxColumn(options=opts(cu.TYPES, "類型"))
-    cfg["顏色"] = st.column_config.SelectboxColumn(options=opts(cu.COLORS, "顏色"))
+    cfg["顏色"] = st.column_config.SelectboxColumn(options=opts(cu.COLORS, "顏色"), width="small")
 
     sig = hashlib.md5(("|".join(df["JAN"]) + str(reapply) + str(check_all)
                        + str(ss.get("rules_ver", 0)) + str(ss.get("cur_ver", 0))).encode()).hexdigest()
