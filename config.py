@@ -42,6 +42,9 @@ CATEGORIES = {
              "aliases": ["集數", "集", "卷數", "卷", "冊數", "冊", "巻", "巻數", "vol", "vol.", "volume"]},
         ],
         "placeholder": "書名、作者、出版社或 ISBN；多個關鍵字用空格分開，例如：航海王 105",
+        # 發佈時同時附加到マスタ登録表：試算表表頭 → 這個種類的欄位（| 分隔可寫多種表頭寫法）
+        "master_fields": {"JANコード": "isbn", "商品名": "title", "本体価格": "price",
+                          "著者名": "author", "出版社名": "publisher"},
     },
     "jumpshop": {
         "label": "JUMP SHOP",
@@ -58,6 +61,7 @@ CATEGORIES = {
         "required": ["jan", "name"],
         "fill_in": [],
         "placeholder": "商品名稱或 JAN；多個關鍵字用空格分開，例如：航海王 吊飾",
+        "master_fields": {"JANコード": "jan", "商品名": "name", "本体価格": "price"},
     },
     # 文具：前 6 欄由建檔檔案匯入（原始資料），後面的標準欄位只在「商品整理」頁填寫。
     "stationery": {
@@ -105,6 +109,7 @@ CATEGORIES = {
         "required": ["jan", "name"],
         "fill_in": [],
         "placeholder": "品番、品名、系列、廠商或 JAN，例如：BLN75 或 飛龍 energel",
+        "master_fields": {"JANコード": "jan", "商品名": "name", "本体価格": "price"},
     },
     "goods": {
         "label": "周邊",
@@ -121,5 +126,46 @@ CATEGORIES = {
         "required": ["jan", "name"],
         "fill_in": [],
         "placeholder": "商品名稱或 JAN",
+        "master_fields": {"JANコード": "jan", "商品名": "name", "本体価格": "price"},
     },
 }
+
+
+# ---------------------------------------------------------------- マスタ登録表
+# 依條碼分表（跟採購工具相同）：978 開頭 → book 表，其他 → other 表。
+# 試算表網址放在 Secrets：
+#   [master_sheet.book]   url = "…"
+#   [master_sheet.other]  url = "…"
+# 各種類要寫哪些欄位，看上面每個種類的 master_fields；這裡設定兩張表共通的版面與固定值。
+_FIXED_COLS = {
+    # 表頭名稱對不上時的備用位置（0＝A 欄），跟採購工具的マスタ登録順序一致
+    "JANコード": 0, "商品名": 1, "部門売り区分|部門売区分": 3, "本体価格": 4,
+    "税区分": 5, "税率コード": 6, "レジジャンルコード": 7, "共通分類コード": 8,
+    "著者名": 12, "出版社名": 19,
+}
+MASTER_SHEETS = {
+    "book": {
+        "label": "書籍（978）",
+        "header_row": 2,                    # 表頭在第 2 列
+        "jan_header": "JANコード",
+        "constants": {                       # 每一列都填的固定值
+            "部門売り区分|部門売区分": 0, "税区分": 0, "税率コード": 1,
+            "レジジャンルコード": 4120, "共通分類コード": 78,
+        },
+        "default_offset": -1,                # 表上還沒有資料時：資料比表頭往左一欄（仮中マ 的格式）
+        "fixed_cols": _FIXED_COLS,
+    },
+    "other": {
+        "label": "非書籍（978 以外）",
+        "header_row": 2,
+        "jan_header": "JANコード",
+        # ⚠️ 非書籍的分類碼還沒確認，先只填確定的三個；確認後把值加在這裡
+        "constants": {"部門売り区分|部門売区分": 0, "税区分": 0, "税率コード": 1},
+        "default_offset": -1,
+        "fixed_cols": _FIXED_COLS,
+    },
+}
+
+
+def master_kind(code: str) -> str:
+    return "book" if str(code).startswith("978") else "other"

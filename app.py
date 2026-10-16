@@ -17,7 +17,8 @@ import db
 import importer
 import synonyms as syn
 import curation_page
-from config import CATEGORIES
+import master_sheet as ms
+from config import CATEGORIES, MASTER_SHEETS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_RESULTS = 300
@@ -295,6 +296,80 @@ def _prepare_records(cat_id: str, cat, up):
     return records or None
 
 
+def _master_confs(cat) -> dict:
+    """
+    這個種類可寫入的マスタ登録表：{"book": 設定, "other": 設定}，只列出 Secrets 有設定的。
+    舊寫法 [master_sheet] url=… 視為 book 表。
+    """
+    if not cat.get("master_fields"):
+        return {}
+    try:
+        root = dict(st.secrets["master_sheet"])
+    except Exception:
+        return {}
+    out = {}
+    for kind in ("book", "other"):
+        try:
+            conf = dict(root[kind])
+        except Exception:
+            continue
+        if conf.get("url") or conf.get("spreadsheet_id"):
+            out[kind] = conf
+    if "book" not in out and (root.get("url") or root.get("spreadsheet_id")):
+        out["book"] = {k: v for k, v in root.items() if k in ("url", "spreadsheet_id", "worksheet_name")}
+    return out
+
+
+def _write_master(cat, records) -> tuple[bool, str]:
+    """依條碼分到 book／other 表各自附加，回傳 (全部成功與否, 訊息)。"""
+    confs = _master_confs(cat)
+    ok_all, lines = True, []
+    for kind, recs in ms.split_by_kind(records, cat).items():
+        label = MASTER_SHEETS[kind]["label"]
+        if kind not in confs:
+            lines.append(f"・{label}：{len(recs)} 筆沒有寫入（Secrets 還沒設定 [master_sheet.{kind}]）")
+            continue
+        try:
+            ws = ms.open_worksheet(st.secrets, confs[kind])
+            n, skipped, where = ms.append(ws, recs, ms.sheet_spec(kind, cat))
+        except Exception as e:
+            ok_all = False
+            lines.append(f"・{label}：寫入失敗 — {e}")
+            continue
+        if n == 0:
+            lines.append(f"・{label}：{skipped} 筆都已經在表上，沒有新增")
+        else:
+            extra = f"，{skipped} 筆已在表上而略過" if skipped else ""
+            lines.append(f"・{label}：已附加 {n} 筆（{where}）{extra}")
+    return ok_all, "マスタ登録表\n\n" + "\n".join(lines)
+
+
+def _master_section(cat, records, done_key):
+    """發佈按鈕上方的選項＋檢查；回傳是否要同時寫入。"""
+    confs = _master_confs(cat)
+    if not confs:
+        return False
+    groups = ms.split_by_kind(records, cat)
+    summary = "、".join(f"{MASTER_SHEETS[k]['label']} {len(v)} 筆" for k, v in groups.items())
+    to_master = st.checkbox(f"同時附加到マスタ登録表（{summary}）", value=True, key=f"tomaster_{done_key}",
+                            help="978 開頭寫入書籍表，其他寫入非書籍表；表上已經有的條碼會略過。")
+    if to_master and st.button("檢查マスタ登録表（寫入位置、會新增幾筆）", key=f"chk_{done_key}"):
+        for kind, recs in groups.items():
+            label = MASTER_SHEETS[kind]["label"]
+            if kind not in confs:
+                st.warning(f"{label}：Secrets 還沒設定 [master_sheet.{kind}]，這 {len(recs)} 筆不會寫入。")
+                continue
+            try:
+                with st.spinner(f"讀取{label}表…"):
+                    ws = ms.open_worksheet(st.secrets, confs[kind])
+                    layout, todo, skipped = ms.plan(ws, recs, ms.sheet_spec(kind, cat))
+                st.info(f"**{label}**：將從第 {layout['next_row']} 列開始附加 {len(todo)} 筆，"
+                        f"{skipped} 筆已在表上會略過。\n\n寫入位置：{ms.describe(layout)}")
+            except Exception as e:
+                st.error(f"{label}：{e}")
+    return to_master
+
+
 def page_maintain():
     st.title("🛠 資料維護")
     editor = _login()
@@ -337,8 +412,21 @@ def page_maintain():
                 help="選「只補上空白的欄位」時，已登錄商品原本有值的欄位（例如品名、售價）一律不會被改動。",
             ) == "只補上空白的欄位"
 
+        to_master = _master_section(cat, records, done_key) if records and not already else False
+
         if already:
             st.success(ss.published[done_key])
+            msg = ss.get("master_msg", {}).get(done_key)
+            if msg:
+                (st.success if msg[0] else st.error)(msg[1])
+            if done_key in ss.get("master_pending", {}):
+                if st.button("重試寫入マスタ登録表", key=f"retry_{done_key}"):
+                    with st.spinner("寫入マスタ登録表…"):
+                        ok, text = _write_master(cat, ss.master_pending[done_key])
+                    ss.master_msg[done_key] = (ok, text)
+                    if ok:
+                        del ss.master_pending[done_key]
+                    st.rerun()
         elif records and st.button("發佈", type="primary", key=f"pub_{cat_id}"):
             merge_fn = lambda cur: _merge(cur, cat, records, editor, up.name, fill_only)
             try:
@@ -358,6 +446,12 @@ def page_maintain():
             result = f"{up.name}：新增 {ins} 筆、更新 {upd} 筆（{cat['label']}共 {total:,} 筆）"
             ss.setdefault("published", {})[done_key] = "✅ 已發佈 — " + result
             ss.setdefault("last_bytes", {})[cat_id] = new_bytes
+            if to_master:
+                with st.spinner("寫入マスタ登録表…"):
+                    ok, text = _write_master(cat, records)
+                ss.setdefault("master_msg", {})[done_key] = (ok, text)
+                if not ok:
+                    ss.setdefault("master_pending", {})[done_key] = records
             st.rerun()
 
     if not gh and ss.get("last_bytes", {}).get(cat_id):
