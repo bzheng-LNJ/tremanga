@@ -34,9 +34,12 @@ CATEGORIES = {
              "aliases": ["定價", "定價(元)", "定價（元）", "售價", "原價", "價格", "建議售價", "price"]},
             {"key": "publisher", "label": "出版社", "kind": "text",
              "aliases": ["出版社", "出版者", "出版公司", "發行", "發行者", "publisher"]},
+            # 類別：填小類（例：動漫-一般大眾）或大類（例：漫畫），選項來自 category_rules.csv
+            {"key": "category", "label": "類別", "kind": "text", "choices": "category",
+             "aliases": ["類別", "分類", "類別名稱", "主題分類", "書籍分類", "category"]},
         ],
         "required": ["isbn", "title"],
-        "fill_in": ["publisher"],
+        "fill_in": ["publisher", "category"],
         "append": [
             {"key": "volume", "label": "集數", "into": "title",
              "aliases": ["集數", "集", "卷數", "卷", "冊數", "冊", "巻", "巻數", "vol", "vol.", "volume"]},

@@ -18,6 +18,8 @@ import importer
 import synonyms as syn
 import curation_page
 import master_sheet as ms
+import categories as cats
+import sales_page
 from config import CATEGORIES, MASTER_SHEETS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +58,18 @@ def _synonym_lookup(mtime: float):
 
 def synonym_lookup() -> dict:
     return _synonym_lookup(os.path.getmtime(SYN_PATH) if os.path.exists(SYN_PATH) else 0)
+
+
+CAT_RULES_PATH = os.path.join(BASE_DIR, cats.FILENAME)
+
+
+@st.cache_data
+def _category_table(mtime: float):
+    return cats.load(CAT_RULES_PATH)
+
+
+def category_table() -> "cats.Categories":
+    return _category_table(os.path.getmtime(CAT_RULES_PATH) if os.path.exists(CAT_RULES_PATH) else 0)
 
 
 def pick_category(key: str) -> str:
@@ -276,9 +290,15 @@ def _prepare_records(cat_id: str, cat, up):
     fill_values = {}
     for f in ifields:
         if f["key"] in cat["fill_in"] and not mapping[f["key"]]:
-            fill_values[f["key"]] = st.text_input(
-                f"這個檔案沒有{f['label']}欄位，請填{f['label']}（會套用到全部商品）",
-                key=f"fill_{cat_id}_{f['key']}")
+            if f.get("choices") == "category":
+                choice = st.selectbox(
+                    f"這個檔案沒有{f['label']}欄位，請選{f['label']}（會套用到全部商品；不選就留空白）",
+                    [""] + category_table().options(), key=f"fill_{cat_id}_{f['key']}")
+                fill_values[f["key"]] = cats.Categories.option_value(choice)
+            else:
+                fill_values[f["key"]] = st.text_input(
+                    f"這個檔案沒有{f['label']}欄位，請填{f['label']}（會套用到全部商品）",
+                    key=f"fill_{cat_id}_{f['key']}")
 
     labels = {f["key"]: f["label"] for f in ifields}
     lacking = [labels[k] for k in cat["required"] if not mapping[k]]
@@ -287,6 +307,20 @@ def _prepare_records(cat_id: str, cat, up):
         return None
 
     records, skipped = importer.build_records(df, mapping, cat, fill_values)
+
+    # 類別：換成對照表上的寫法，並提醒對照表裡沒有的類別
+    for f in ifields:
+        if f.get("choices") == "category":
+            table = category_table()
+            unknown = {}
+            for r in records:
+                if r.get(f["key"]):
+                    r[f["key"]] = table.canonical(r[f["key"]])
+                    if table.major_of(r[f["key"]]) == cats.UNKNOWN:
+                        unknown[r[f["key"]]] = unknown.get(r[f["key"]], 0) + 1
+            if unknown:
+                st.warning("這些類別不在類別對照表裡（賣上分析會歸到「不在對照表」）："
+                           + "、".join(f"{k}（{v} 筆）" for k, v in unknown.items()))
     st.markdown(f"**預覽**：可登錄 {len(records)} 筆，略過 {len(skipped)} 筆")
     if records:
         st.dataframe([{labels[k]: v for k, v in r.items()} for r in records[:20]], hide_index=True)
@@ -368,6 +402,68 @@ def _master_section(cat, records, done_key):
             except Exception as e:
                 st.error(f"{label}：{e}")
     return to_master
+
+
+def _batch_category_section(cat_id, cat, editor):
+    """批次設定類別：篩選已登錄的商品，一次套用同一個類別。"""
+    field = next((f for f in cat["fields"] if f.get("choices") == "category"), None)
+    if not field:
+        return
+    ss = st.session_state
+    st.divider()
+    with st.expander("批次設定類別（已登錄的商品）", expanded=bool(ss.get("bulk_msg"))):
+        if ss.get("bulk_msg"):
+            st.success(ss.pop("bulk_msg"))
+        data = db.fetch_all(current_conn(cat_id), cat)
+        if data.empty:
+            st.caption("還沒有資料。")
+            return
+        key, pk = field["key"], db.key_field(cat)
+        name_key = cat["fields"][1]["key"]
+        c1, c2, c3 = st.columns([1.2, 2, 1.5])
+        scope = c1.radio("對象", ["類別空白的", "全部"], key="bulk_scope")
+        pubs = sorted(p for p in data["publisher"].unique() if p) if "publisher" in data else []
+        pick = c2.multiselect("出版社", pubs, placeholder="全部出版社", key="bulk_pub")
+        kw = c3.text_input("書名包含", key="bulk_kw")
+
+        view = data
+        if scope == "類別空白的":
+            view = view[view[key] == ""]
+        if pick:
+            view = view[view["publisher"].isin(pick)]
+        if kw.strip():
+            k = db.normalize(kw).replace(" ", "")
+            view = view[view[name_key].map(lambda t: k in db.normalize(t).replace(" ", ""))]
+
+        st.caption(f"符合條件：{len(view):,} 筆（全部 {len(data):,} 筆，其中類別空白 {(data[key] == '').sum():,} 筆）")
+        if view.empty:
+            return
+        st.dataframe(view[[pk, name_key, "publisher", key]].head(200).rename(
+            columns={pk: db.field_label(cat, pk), name_key: db.field_label(cat, name_key),
+                     "publisher": "出版社", key: "目前類別"}),
+            hide_index=True, use_container_width=True, height=240)
+        if len(view) > 200:
+            st.caption("只列出前 200 筆，套用時會包含全部符合的商品。")
+
+        choice = st.selectbox("要套用的類別", [""] + category_table().options(), key="bulk_choice")
+        value = cats.Categories.option_value(choice)
+        if st.button(f"把這 {len(view):,} 筆設為「{value or '—'}」並發佈", type="primary",
+                     disabled=not value, key="bulk_go"):
+            updates = [{pk: r, key: value} for r in view[pk]]
+
+            def work(conn):
+                n = db.update_fields(conn, cat, updates)
+                db.add_log(conn, editor, f"批次設定類別：{value}", 0, n)
+                return n
+            try:
+                with st.spinner("發佈中…"):
+                    _, n = publish_db(cat_id, lambda cur: edit_db_copy(cur, cat, work),
+                                      f"{editor} 批次設定{cat['label']}類別「{value}」（{len(updates)} 筆）")
+            except Exception as e:
+                st.error(f"發佈失敗，資料沒有變更：{e}")
+                return
+            ss.bulk_msg = f"✅ 已把 {n:,} 筆的類別設為「{value}」。"
+            st.rerun()
 
 
 def page_maintain():
@@ -458,6 +554,8 @@ def page_maintain():
         st.download_button(f"下載 {cat['db']}", data=ss.last_bytes[cat_id],
                            file_name=cat["db"], mime="application/octet-stream")
 
+    _batch_category_section(cat_id, cat, editor)
+
     st.divider()
     st.markdown(f"**{cat['label']}最近的登錄紀錄**")
     logs = db.recent_logs(current_conn(cat_id))
@@ -519,13 +617,18 @@ def page_synonyms():
 
 
 # ====================================================================== 導覽
-page = st.sidebar.radio("功能", ["🔍 商品查詢", "🛠 資料維護", "📖 同義詞表", "🏷 商品整理"])
+page = st.sidebar.radio("功能", ["🔍 商品查詢", "🛠 資料維護", "📖 同義詞表", "🏷 商品整理", "📊 賣上分析"])
 if page == "🔍 商品查詢":
     page_search()
 elif page == "🛠 資料維護":
     page_maintain()
 elif page == "📖 同義詞表":
     page_synonyms()
+elif page == "📊 賣上分析":
+    sales_page.render({
+        "login": _login, "current_conn": current_conn, "category_table": category_table,
+        "PastedData": PastedData, "github": _github, "base_dir": BASE_DIR,
+    })
 else:
     curation_page.render({
         "login": _login, "github": _github, "current_conn": current_conn,
