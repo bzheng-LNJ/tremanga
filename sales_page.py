@@ -133,7 +133,10 @@ def _analysis_tab(ctx):
     if missing:
         st.warning(f"請在「欄位對應」指定：{'、'.join(missing)}")
         return
-    if not mapping["unit_price"] and not mapping["amount"]:
+    if not mapping["qty"] and not mapping["stock"]:
+        st.warning("請在「欄位對應」指定「賣上數量」或「庫存」其中一個。")
+        return
+    if mapping["qty"] and not mapping["unit_price"] and not mapping["amount"]:
         st.warning("請在「欄位對應」指定「賣上價格」或「合計賣上金額」其中一個。")
         return
 
@@ -158,7 +161,12 @@ def _analysis_tab(ctx):
     c[3].metric("類別未設定", f"{n_unset:,} 品項")
     notes = []
     if len(skipped):
-        notes.append(f"略過 {len(skipped)} 列（條碼無法辨識或沒有數量，合計列也會被略過）")
+        notes.append(f"略過 {len(skipped)} 列（條碼無法辨識或沒有數量／庫存，合計列也會被略過）")
+    if sales.has_stock(detail):
+        stock_total = detail.drop_duplicates("ISBN(JAN)")[sales.STOCK].sum()
+        zero_sale = (detail.groupby("ISBN(JAN)")["賣上數量"].sum() == 0).sum()
+        notes.append(f"含庫存資料：庫存合計 {int(stock_total):,} 冊"
+                     + (f"；其中 {zero_sale} 個品項只有庫存、沒有賣上（以 0 冊、0 元列入）" if zero_sale else ""))
     if n_missing:
         notes.append(f"{n_missing} 個品項在中文書資料庫查不到，歸在「{cats.NOT_FOUND}」，出版社、店頭價格會是空白")
     if n_unknown:
@@ -198,7 +206,7 @@ def _analysis_tab(ctx):
                 view = view[view["類別"].replace("", "（空白）") == sub]
     st.caption(f"{pick}：{view['ISBN(JAN)'].nunique():,} 品項、{int(view['賣上數量'].sum()):,} 冊、"
                f"金額 {view['合計賣上金額'].sum():,.0f}")
-    st.dataframe(view[sales.DETAIL_COLS], hide_index=True, use_container_width=True,
+    st.dataframe(view[sales.detail_cols(detail)], hide_index=True, use_container_width=True,
                  column_config={"ISBN(JAN)": st.column_config.TextColumn(),
                                 "商品名": st.column_config.TextColumn(width="large")})
 
@@ -213,6 +221,8 @@ def _pretty(major):
     for c in ("冊數占比", "金額占比"):
         d[c] = d[c].map(lambda v: f"{v:.1%}")
     d["小計金額"] = d["小計金額"].map(lambda v: f"{v:,.0f}")
+    if "庫存冊數" in d:
+        d["庫存冊數"] = d["庫存冊數"].map(lambda v: "" if pd.isna(v) else f"{int(v):,}")
     d["冊數"] = d["冊數"].map(lambda v: f"{v:,.0f}")
     return d
 
