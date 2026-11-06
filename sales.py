@@ -1,9 +1,12 @@
 """
 sales.py — 賣上分析的計算（不含畫面）。
 
-輸入：賣上資料（條碼、商品名、賣上價格、賣上數量、合計賣上金額，欄位名稱可自動辨識）
-對照：用條碼到商品資料庫（books.db）查商品名、類別、出版社、店頭價格（建檔時的定價）
-輸出：商品明細、類別（小類）彙總、大類彙總
+輸入：賣上資料（條碼、商品名、賣上價格、賣上數量、合計賣上金額、庫存，欄位名稱可自動辨識）
+對照：用條碼到商品資料庫（中文書 books.db、文具 stationery.db…）查商品名、店頭價格與分析用的欄位
+分組：依選擇的「分析維度」分組——中文書可用類別（大類／小類）、出版社；
+      文具可用棚番、出版社・メーカー、系列…（設定在 config.py 各種類的 "sales"），
+      也可以用賣上資料本身的某一欄（例如報表裡的棚番欄）
+輸出：分組彙總、（類別維度時）類別彙總、商品明細
 
 賣上資料只在當下計算，不會存進資料庫或 GitHub。
 """
@@ -60,7 +63,7 @@ def clean_code(raw) -> str | None:
     return db.clean_jan(raw) or db.clean_isbn(raw)
 
 
-def parse(df: pd.DataFrame, mapping: dict):
+def parse(df: pd.DataFrame, mapping: dict, extra_col: str | None = None):
     """
     依欄位對應整理賣上資料。
     回傳 (rows DataFrame[code, name, unit_price, qty, amount, stock], 略過的列 DataFrame)
@@ -95,17 +98,36 @@ def parse(df: pd.DataFrame, mapping: dict):
             skipped.append({"Excel 列號": idx + 1, "原始條碼": code, "原因": "沒有賣上價格也沒有金額"})
             continue
         rows.append({"code": code, "name": db.clean_text(get("name")), "unit_price": price,
-                     "qty": qty, "amount": amount, "stock": stock})
-    return (pd.DataFrame(rows, columns=["code", "name", "unit_price", "qty", "amount", "stock"]),
+                     "qty": qty, "amount": amount, "stock": stock,
+                     "extra": db.clean_text(r[extra_col]) if extra_col else ""})
+    return (pd.DataFrame(rows, columns=["code", "name", "unit_price", "qty", "amount", "stock", "extra"]),
             pd.DataFrame(skipped))
 
 
-def build_detail(rows: pd.DataFrame, products: pd.DataFrame, table: cats.Categories) -> pd.DataFrame:
+GROUP, SUB = "分組", "子分組"          # 明細裡的分析分組欄（顯示時換成維度名稱）
+UNSET_GENERIC = "（未設定）"
+
+
+def dimension_value(p, dim) -> str:
+    """商品資料（一列）→ 這個分析維度的值；設了 fallback 的話，空白時改用 fallback 欄位。"""
+    v = db.clean_text(p.get(dim["key"]))
+    if not v and dim.get("fallback"):
+        v = db.clean_text(p.get(dim["fallback"]))
+    return v
+
+
+def build_detail(rows: pd.DataFrame, products: pd.DataFrame, table: cats.Categories,
+                 spec: dict | None = None, dim: dict | None = None) -> pd.DataFrame:
     """
     products：商品資料庫的整張表（db.fetch_all，欄名用英文 key）。
+    spec：config 裡該種類的 "sales" 設定（商品名、明細欄位）；dim：選擇的分析維度。
     同一條碼、同一賣上價格的多筆合併成一列（不同折扣價分開列）。
-    回傳的明細多兩欄：大類、在資料庫（True/False）。
+    回傳的明細多三欄：分組、子分組、在資料庫（True/False）。
     """
+    spec = spec or {"name": ["title"], "detail": [["類別", "category"], ["出版社", "publisher"]]}
+    dim = dim or {"key": "category", "label": "類別", "mapped": True}
+    from_sales = dim.get("source") == "sales"           # 維度來自賣上資料本身的欄位
+
     info = {}
     if not products.empty:
         pk = products.columns[0]
@@ -114,35 +136,59 @@ def build_detail(rows: pd.DataFrame, products: pd.DataFrame, table: cats.Categor
     # 庫存是「這本書現在有幾本」，同一本書出現好幾列時取最後一個有值的，不相加
     stock_of = rows.dropna(subset=["stock"]).groupby("code")["stock"].last().to_dict() \
         if "stock" in rows else {}
-    g = (rows.groupby(["code", "unit_price"], dropna=False, sort=False)
-             .agg(name=("name", "first"), qty=("qty", "sum"), amount=("amount", "sum"))
-             .reset_index())
+    agg = dict(name=("name", "first"), qty=("qty", "sum"), amount=("amount", "sum"))
+    if "extra" in rows:
+        agg["extra"] = ("extra", "first")
+    g = (rows.groupby(["code", "unit_price"], dropna=False, sort=False).agg(**agg).reset_index())
+
+    extra_cols = [label for label, _ in spec["detail"]]
+    dim_label = dim["label"]
+    show_dim_col = not dim.get("mapped") and dim_label not in extra_cols
+
     out = []
     for _, r in g.iterrows():
         p = info.get(r["code"])
         found = p is not None
-        title = (p.get("title") or p.get("name") or "") if found else ""
-        category = (p.get("category") or "") if found else ""
-        shelf = to_number(p.get("price")) if found else None
-        out.append({
-            "ISBN(JAN)": r["code"],
-            "品番": (p.get("model") or "") if found else "",
-            "商品名": title or r["name"],
-            "類別": category,
-            "出版社": (p.get("publisher") or "") if found else "",
-            "店頭價格": shelf,
+        name = ""
+        if found:
+            name = next((db.clean_text(p.get(k)) for k in spec["name"] if db.clean_text(p.get(k))), "")
+        rec = {"ISBN(JAN)": r["code"],
+               "品番": db.clean_text(p.get("model")) if found else "",
+               "商品名": name or r["name"]}
+        if from_sales:
+            value = db.clean_text(r.get("extra"))
+        else:
+            value = dimension_value(p, dim) if found else ""
+        if show_dim_col:
+            rec[dim_label] = value
+        for label, key in spec["detail"]:
+            rec[label] = db.clean_text(p.get(key)) if found else ""
+        if from_sales and dim_label in extra_cols and not rec[dim_label]:
+            rec[dim_label] = value                 # 例：賣上資料的棚番欄，資料庫還沒有棚番時直接顯示它
+        rec.update({
+            "店頭價格": to_number(p.get("price")) if found else None,
             "賣上價格": None if pd.isna(r["unit_price"]) else r["unit_price"],
             "賣上數量": r["qty"],
             "合計賣上金額": r["amount"],
             STOCK: stock_of.get(r["code"]),
-            "大類": table.major_of(category) if found else cats.NOT_FOUND,
-            "在資料庫": found,
         })
-    df = pd.DataFrame(out, columns=DETAIL_COLS + [STOCK, "大類", "在資料庫"])
+        if dim.get("mapped"):                      # 類別：依對照表歸到大類，子分組＝類別本身
+            rec[GROUP] = table.major_of(value) if found else cats.NOT_FOUND
+            rec[SUB] = value or "（空白）"
+        else:
+            rec[GROUP] = value or (UNSET_GENERIC if (found or from_sales) else cats.NOT_FOUND)
+            rec[SUB] = ""
+        rec["在資料庫"] = found
+        out.append(rec)
+
+    cols = ["ISBN(JAN)", "品番", "商品名"] + ([dim_label] if show_dim_col else []) + extra_cols \
+        + ["店頭價格", "賣上價格", "賣上數量", "合計賣上金額", STOCK, GROUP, SUB, "在資料庫"]
+    df = pd.DataFrame(out, columns=cols)
     for col in ("店頭價格", "賣上價格", STOCK):          # 沒有小數的話用整數顯示（空白保持空白）
         v = pd.to_numeric(df[col], errors="coerce")
         if (v.dropna() % 1 == 0).all():
             df[col] = v.astype("Int64")
+    df.attrs["dim"] = dim
     return df.sort_values(["合計賣上金額", "賣上數量"], ascending=False).reset_index(drop=True)
 
 
@@ -152,7 +198,16 @@ def has_stock(detail: pd.DataFrame) -> bool:
 
 def detail_cols(detail: pd.DataFrame) -> list[str]:
     """明細要顯示／下載的欄位：有庫存資料時，最後多一欄庫存。"""
-    return DETAIL_COLS + ([STOCK] if has_stock(detail) else [])
+    cols = [c for c in detail.columns if c not in (STOCK, GROUP, SUB, "在資料庫")]
+    return cols + ([STOCK] if has_stock(detail) else [])
+
+
+def group_labels(detail: pd.DataFrame) -> dict:
+    """分組欄要顯示的名稱：類別維度是「大類／類別」，其他維度就是維度名稱。"""
+    dim = detail.attrs.get("dim", {"mapped": True})
+    if dim.get("mapped"):
+        return {GROUP: "大類", SUB: "類別"}
+    return {GROUP: dim.get("label", "分組")}
 
 
 def _stock_by(detail: pd.DataFrame, keys: list[str]) -> pd.Series:
@@ -161,44 +216,59 @@ def _stock_by(detail: pd.DataFrame, keys: list[str]) -> pd.Series:
     return d.groupby(keys)[STOCK].sum(min_count=1)
 
 
+NEUTRAL_GROUPS = [cats.UNSET, cats.UNKNOWN, UNSET_GENERIC, cats.NOT_FOUND]
+
+
+def group_order(detail: pd.DataFrame, table: cats.Categories) -> list[str]:
+    """分組的排列順序：類別維度照對照表；其他維度照金額由大到小；未設定、查無放最後。"""
+    present = set(detail[GROUP])
+    dim = detail.attrs.get("dim", {"mapped": True})
+    if dim.get("mapped"):
+        head = [m for m in table.majors if m in present]
+    else:
+        amt = detail.groupby(GROUP)["合計賣上金額"].sum().sort_values(ascending=False)
+        head = [m for m in amt.index if m not in NEUTRAL_GROUPS]
+    return head + [m for m in NEUTRAL_GROUPS if m in present]
+
+
 def major_order(table: cats.Categories) -> list[str]:
     return table.majors + [cats.UNSET, cats.UNKNOWN, cats.NOT_FOUND]
 
 
 def pivot_major(detail: pd.DataFrame, table: cats.Categories) -> pd.DataFrame:
-    """大類彙總：品項數、冊數、金額、占比（依對照表順序），最後一列是合計。"""
-    g = detail.groupby("大類").agg(品項數=("ISBN(JAN)", "nunique"), 冊數=("賣上數量", "sum"),
-                                   小計金額=("合計賣上金額", "sum"))
-    order = [m for m in major_order(table) if m in g.index]
-    g = g.loc[order].reset_index()
+    """分組彙總：品項數、冊數、金額、占比，最後一列是合計。欄名是內部名稱「分組」。"""
+    g = detail.groupby(GROUP).agg(品項數=("ISBN(JAN)", "nunique"), 冊數=("賣上數量", "sum"),
+                                  小計金額=("合計賣上金額", "sum"))
+    g = g.loc[[m for m in group_order(detail, table) if m in g.index]].reset_index()
     tq, ta = g["冊數"].sum(), g["小計金額"].sum()
     g["冊數占比"] = g["冊數"] / tq if tq else 0
     g["金額占比"] = g["小計金額"] / ta if ta else 0
-    total = {"大類": "合計", "品項數": detail["ISBN(JAN)"].nunique(), "冊數": tq,
+    total = {GROUP: "合計", "品項數": detail["ISBN(JAN)"].nunique(), "冊數": tq,
              "小計金額": ta, "冊數占比": 1.0 if tq else 0, "金額占比": 1.0 if ta else 0}
     if has_stock(detail):
-        g["庫存冊數"] = g["大類"].map(_stock_by(detail, ["大類"])).astype("Int64")
+        g["庫存冊數"] = g[GROUP].map(_stock_by(detail, [GROUP])).astype("Int64")
         total["庫存冊數"] = int(g["庫存冊數"].sum())
     return pd.concat([g, pd.DataFrame([total])], ignore_index=True)
 
 
-def pivot_minor(detail: pd.DataFrame, table: cats.Categories) -> pd.DataFrame:
-    """類別（小類）彙總，依大類排列，每個大類後面有小計列。"""
-    d = detail.assign(類別=detail["類別"].replace("", "（空白）"))
-    g = d.groupby(["大類", "類別"]).agg(品項數=("ISBN(JAN)", "nunique"), 冊數=("賣上數量", "sum"),
-                                        小計金額=("合計賣上金額", "sum")).reset_index()
+def pivot_minor(detail: pd.DataFrame, table: cats.Categories) -> pd.DataFrame | None:
+    """子分組彙總（只有類別維度有：大類底下的類別），每個大類後面有小計列。"""
+    if not detail.attrs.get("dim", {"mapped": True}).get("mapped"):
+        return None
+    g = detail.groupby([GROUP, SUB]).agg(品項數=("ISBN(JAN)", "nunique"), 冊數=("賣上數量", "sum"),
+                                         小計金額=("合計賣上金額", "sum")).reset_index()
     stock = has_stock(detail)
     if stock:
-        sb = _stock_by(d, ["大類", "類別"])
-        g["庫存冊數"] = [sb.get((a, b)) for a, b in zip(g["大類"], g["類別"])]
+        sb = _stock_by(detail, [GROUP, SUB])
+        g["庫存冊數"] = [sb.get((a, b)) for a, b in zip(g[GROUP], g[SUB])]
         g["庫存冊數"] = g["庫存冊數"].astype("Int64")
     out = []
-    for m in major_order(table):
-        part = g[g["大類"] == m].sort_values("小計金額", ascending=False)
+    for m in group_order(detail, table):
+        part = g[g[GROUP] == m].sort_values("小計金額", ascending=False)
         if part.empty:
             continue
         out.append(part)
-        sub = {"大類": m, "類別": "小計", "品項數": part["品項數"].sum(),
+        sub = {GROUP: m, SUB: "小計", "品項數": part["品項數"].sum(),
                "冊數": part["冊數"].sum(), "小計金額": part["小計金額"].sum()}
         if stock:
             sub["庫存冊數"] = int(part["庫存冊數"].sum())
@@ -206,11 +276,25 @@ def pivot_minor(detail: pd.DataFrame, table: cats.Categories) -> pd.DataFrame:
     return pd.concat(out, ignore_index=True) if out else g
 
 
-def to_excel_bytes(major: pd.DataFrame, minor: pd.DataFrame, detail: pd.DataFrame) -> bytes:
+def count_labels(unit: str) -> dict:
+    """中文書用「冊」，其他商品用「數量」。"""
+    if unit == "冊":
+        return {}
+    return {"冊數": "數量", "冊數占比": "數量占比", "庫存冊數": "庫存數"}
+
+
+def to_excel_bytes(major: pd.DataFrame, minor: pd.DataFrame | None, detail: pd.DataFrame,
+                   unit: str = "冊") -> bytes:
     import io
+    names = dict(group_labels(detail), **count_labels(unit))
+    top = names[GROUP]
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        major.to_excel(w, sheet_name="大類彙總", index=False)
-        minor.to_excel(w, sheet_name="類別彙總", index=False)
-        detail[detail_cols(detail) + ["大類"]].to_excel(w, sheet_name="商品明細", index=False)
+        major.rename(columns=names).to_excel(w, sheet_name=f"{top}彙總"[:31], index=False)
+        if minor is not None:
+            minor.rename(columns=names).to_excel(w, sheet_name="類別彙總", index=False)
+        cols = detail_cols(detail) + [GROUP] + ([SUB] if group_labels(detail).get(SUB) else [])
+        out = detail[cols].rename(columns=names)
+        out = out.loc[:, ~out.columns.duplicated()]
+        out.to_excel(w, sheet_name="商品明細", index=False)
     return buf.getvalue()

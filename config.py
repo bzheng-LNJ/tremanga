@@ -48,6 +48,15 @@ CATEGORIES = {
         # 發佈時同時附加到マスタ登録表：試算表表頭 → 這個種類的欄位（| 分隔可寫多種表頭寫法）
         "master_fields": {"JANコード": "isbn", "商品名": "title", "本体価格": "price",
                           "著者名": "author", "出版社名": "publisher"},
+        # 賣上分析：商品名用哪一欄、明細多帶哪些欄、可以選哪些分析維度（分組方式）
+        "sales": {
+            "name": ["title"],
+            "detail": [["類別", "category"], ["出版社", "publisher"]],
+            "dims": [
+                {"key": "category", "label": "類別（大類／小類）", "mapped": True},
+                {"key": "publisher", "label": "出版社"},
+            ],
+        },
     },
     "jumpshop": {
         "label": "JUMP SHOP",
@@ -64,6 +73,7 @@ CATEGORIES = {
         "required": ["jan", "name"],
         "fill_in": [],
         "placeholder": "商品名稱或 JAN；多個關鍵字用空格分開，例如：航海王 吊飾",
+        "sales": {"name": ["name"], "detail": [], "dims": []},   # 分析維度只能用賣上資料本身的欄位
         "master_fields": {"JANコード": "jan", "商品名": "name", "本体価格": "price"},
     },
     # 文具：前 6 欄由建檔檔案匯入（原始資料），後面的標準欄位只在「商品整理」頁填寫。
@@ -85,6 +95,8 @@ CATEGORIES = {
              "aliases": ["出版社・メーカー", "出版社･メーカー", "メーカー", "メーカー名", "廠商", "品牌"]},
             {"key": "category", "label": "共通分類", "kind": "text",
              "aliases": ["共通分類", "分類"]},
+            {"key": "shelf", "label": "棚番", "kind": "text",
+             "aliases": ["棚番", "棚號", "棚位", "櫃位", "架位", "shelf"]},
             # ---- 標準欄位（商品整理頁填寫，匯入時不會被覆蓋）
             {"key": "maker", "label": "廠商", "kind": "text", "import": False},
             # 整理後品名：原始品名去掉已經拆到其他欄位的部分（之後統一成中文名稱也放這裡）
@@ -113,6 +125,18 @@ CATEGORIES = {
         "fill_in": [],
         "placeholder": "品番、品名、系列、廠商或 JAN，例如：BLN75 或 飛龍 energel",
         "master_fields": {"JANコード": "jan", "商品名": "name", "本体価格": "price"},
+        "sales": {
+            "name": ["title", "name"],          # 有整理後品名就用它，沒有就用原始品名
+            "detail": [["出版社・メーカー", "raw_maker"], ["棚番", "shelf"]],
+            "dims": [
+                {"key": "shelf", "label": "棚番"},
+                {"key": "raw_maker", "label": "出版社・メーカー", "fallback": "maker"},
+                {"key": "maker", "label": "廠商（整理後）", "fallback": "raw_maker"},
+                {"key": "series", "label": "系列"},
+                {"key": "type", "label": "類型"},
+                {"key": "category", "label": "共通分類"},
+            ],
+        },
     },
     "goods": {
         "label": "周邊",
@@ -129,6 +153,7 @@ CATEGORIES = {
         "required": ["jan", "name"],
         "fill_in": [],
         "placeholder": "商品名稱或 JAN",
+        "sales": {"name": ["name"], "detail": [], "dims": []},   # 分析維度只能用賣上資料本身的欄位
         "master_fields": {"JANコード": "jan", "商品名": "name", "本体価格": "price"},
     },
 }
